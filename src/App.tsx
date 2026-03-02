@@ -1,33 +1,15 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { objectToBase64, useGlobal } from 'qapp-core';
 import { useAtom } from 'jotai';
+import { MapContainer } from 'react-leaflet';
 
 // Add this import for the theme atom
 import { EnumTheme, themeAtom } from './state/global/system';
+import { QdnTileLayer, MapViewSync } from './components/QdnTileLayer';
 
 interface IdentifierMapping {
   identifier: string;
   name: string;
-}
-
-interface ImageTileProps {
-  image: string | null;
-  index: number;
-  loading: boolean;
-  zoom: number;
-  x: number;
-  y: number;
-  onTileClick: (event: React.MouseEvent<HTMLDivElement>, identifier: string) => void;
-}
-
-interface ImageGridProps {
-  images: Array<string | null>;
-  imageLoading: boolean[];
-  zoom: number;
-  x: number;
-  y: number;
-  onTileClick: (event: React.MouseEvent<HTMLDivElement>, identifier: string) => void;
-  containerRef: React.RefObject<HTMLDivElement | null>;
 }
 
 // Define interfaces for our component props
@@ -67,104 +49,6 @@ interface NeighborhoodData {
   l: string; // location coordinates separated by dash marks
   timestamp?: string | null; // timestamp when neighborhood was last updated
 }
-
-// ImageTile component
-const ImageTile = ({
-                     image,
-                     index,
-                     loading,
-                     zoom,
-                     x,
-                     y,
-                     onTileClick
-                   }: ImageTileProps) => {
-  return (
-    <div
-      key={index}
-      style={{
-        width: '256px',
-        height: '256px',
-        backgroundColor: 'transparent',
-        display: 'flex',
-        justifyContent: 'center',
-        alignItems: 'center',
-        fontSize: '24px',
-        textAlign: 'center',
-        position: 'relative'
-      }}
-      onClick={(event) => onTileClick(event, `${zoom}-${x + (index % 2)}-${y + Math.floor(index / 2)}`)}
-    >
-      {loading ? (
-        <div className="spinner"></div>
-      ) : (
-        <>
-          {typeof image === 'string' && image.startsWith('data:image/png;base64,') ? (
-            <img src={image} alt={`Tile ${index}`} style={{ width: '100%', height: '100%' }} />
-          ) : (
-            <div style={{ whiteSpace: 'pre' }}>{image}</div>
-          )}
-        </>
-      )}
-    </div>
-  );
-};
-
-// ImageGrid component
-const ImageGrid = ({
-                     images,
-                     imageLoading,
-                     zoom,
-                     x,
-                     y,
-                     onTileClick,
-                     containerRef
-                   }: ImageGridProps) => {
-  // Check if all images are identical error strings
-  const isAllSameError =
-    images.length === 4 &&
-    images.every(
-      (img, _i, arr) =>
-        typeof img === 'string' &&
-        (img.startsWith('Error') || img.startsWith('Missing')) &&
-        img === arr[0]
-    );
-
-  if (isAllSameError) {
-    return (
-      <div ref={containerRef} style={{ 
-        width: '512px', 
-        height: '512px', 
-        display: 'flex', 
-        justifyContent: 'center', 
-        alignItems: 'center', 
-        fontSize: '24px', 
-        textAlign: 'center', 
-        whiteSpace: 'pre',
-        backgroundColor: 'rgba(0,0,0,0.05)',
-        borderRadius: '8px'
-      }}>
-        {images[0]}
-      </div>
-    );
-  }
-
-  return (
-    <div ref={containerRef} style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 256px)', gridTemplateRows: 'repeat(2, 256px)', gap: '0', position: 'relative' }}>
-      {images.map((image, index) => (
-        <ImageTile
-          key={index}
-          image={image}
-          index={index}
-          loading={imageLoading[index]}
-          zoom={zoom}
-          x={x}
-          y={y}
-          onTileClick={onTileClick}
-        />
-      ))}
-    </div>
-  );
-};
 
 // SearchResultItem component
 const SearchResultItem = ({ result, onLinkClick }: SearchResultItemProps) => {
@@ -263,8 +147,6 @@ function App() {
   const [identifiersFetched, setIdentifiersFetched] = useState(false);
   const [loading, setLoading] = useState(true);
   const [imageLoading, setImageLoading] = useState<boolean[]>(Array(4).fill(false));
-  // Fixed: Changed the type to HTMLDivElement | null to match useRef's return type
-  const gridContainerRef = useRef<HTMLDivElement | null>(null);
 
   // States for the Search form
   const [searchQueryTerm, setSearchQueryTerm] = useState('');
@@ -376,10 +258,6 @@ function App() {
       ...modalState,
       isOpen: false
     });
-  };
-
-  const onTileClick = (_: React.MouseEvent<HTMLDivElement>, identifier: string) => {
-    console.log('Tile clicked:', identifier);
   };
 
   // Replace the existing function with this updated version
@@ -1051,9 +929,9 @@ function App() {
         return;
       }
 
-      if (newZoom < 0 || newZoom > 20) {
+      if (newZoom < 1 || newZoom > 20) {
         console.error('Invalid zoom level in link:', newZoom);
-        alert(`Invalid zoom level: ${newZoom}. Must be between 0 and 20`);
+        alert(`Invalid zoom level: ${newZoom}. Must be between 1 and 20`);
         return;
       }
 
@@ -1194,7 +1072,7 @@ function App() {
       newX >= 2 ** currentZoom ||
       newY < 0 ||
       newY >= 2 ** currentZoom ||
-      currentZoom <= 0 ||
+      currentZoom <= 1 ||
       currentZoom >= 20
     );
   };
@@ -1292,8 +1170,7 @@ function App() {
     }
   }, [identifiers, identifiersFetched, x, y, zoom, isNavigating]);
 
-  const fetchImage = async (identifier: string) => {
-    // Find the identifier mapping to get the correct name
+  const fetchImage = useCallback(async (identifier: string) => {
     const identifierMapping = identifiers.find(
       (item) => item.identifier === identifier
     );
@@ -1304,23 +1181,19 @@ function App() {
           action: 'FETCH_QDN_RESOURCE',
           identifier,
           encoding: 'base64',
-          name: identifierMapping.name, // Use the mapped name
+          name: identifierMapping.name,
           service: 'IMAGE',
           rebuild: false,
         });
 
-        // Check if image64 is already a complete data URI
         if (image64.startsWith('data:image/')) {
-          return image64; // Return as-is
+          return image64;
         } else {
-          // Handle potential Base64 encoding issues by using a try-catch block
           try {
-            // Check if the string is valid Base64 by attempting to decode it
             window.atob(image64);
             return `data:image/png;base64,${image64}`;
           } catch (e) {
             console.error('Invalid Base64 string:', e);
-            // Return an error message instead of trying to use the invalid Base64
             return `Error\nInvalid\nBase64\n${identifier}`;
           }
         }
@@ -1331,7 +1204,12 @@ function App() {
     } else {
       return `Missing\nIdentifier\n${identifier}`;
     }
-  };
+  }, [identifiers]);
+
+  const fetchTileImage = useCallback(
+    (z: number, x: number, y: number) => fetchImage(`${z}-${x}-${y}`),
+    [fetchImage]
+  );
 
   // Handle Start Freedom Cell wizard submission - prepare for confirmation
   const handleFreedomCellSubmit = async (e: React.FormEvent) => {
@@ -2188,7 +2066,7 @@ function App() {
 
             {/* Map Container with Integrated Controls */}
             <div style={{ position: 'relative', width: '550px', height: '550px' }}>
-              {/* Map Images Container */}
+              {/* Leaflet Map Container */}
               <div style={{
                 position: 'absolute',
                 top: '20px',
@@ -2197,7 +2075,8 @@ function App() {
                 bottom: '20px',
                 overflow: 'hidden',
                 borderRadius: '4px',
-                border: '1px solid #ccc'
+                border: '1px solid #ccc',
+                zIndex: 0,
               }}>
                 {loading ? (
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -2210,15 +2089,26 @@ function App() {
                     <p>Waiting for Cartographer names to load...</p>
                   </div>
                 ) : (
-                  <ImageGrid
-                    images={images}
-                    imageLoading={imageLoading}
+                  <MapContainer
+                    center={[0, 0]}
                     zoom={zoom}
-                    x={x}
-                    y={y}
-                    containerRef={gridContainerRef}
-                    onTileClick={onTileClick}
-                  />
+                    style={{ height: '100%', width: '100%' }}
+                    zoomControl={false}
+                    maxZoom={20}
+                    minZoom={1}
+                    maxBounds={[[-85.051129, -180], [85.051129, 180]]}
+                    maxBoundsViscosity={1.0}
+                  >
+                    <MapViewSync
+                      zoom={zoom}
+                      x={x}
+                      y={y}
+                      setZoom={setZoom}
+                      setX={setX}
+                      setY={setY}
+                    />
+                    <QdnTileLayer fetchTileImage={fetchTileImage} />
+                  </MapContainer>
                 )}
               </div>
 
@@ -3821,9 +3711,9 @@ function App() {
                             return;
                           }
 
-                          if (newZoom < 0 || newZoom > 20) {
+                          if (newZoom < 1 || newZoom > 20) {
                             console.error('Invalid zoom level in location:', newZoom);
-                            showErrorModal(`Invalid zoom level: ${newZoom}. Must be between 0 and 20`);
+                            showErrorModal(`Invalid zoom level: ${newZoom}. Must be between 1 and 20`);
                             return;
                           }
 
