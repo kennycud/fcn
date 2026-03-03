@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { objectToBase64, useGlobal } from 'qapp-core';
 import { useAtom } from 'jotai';
-import { MapContainer } from 'react-leaflet';
+import { MapContainer, Marker, Popup, useMap, useMapEvent } from 'react-leaflet';
 import L from 'leaflet';
 
 // Add this import for the theme atom
@@ -54,6 +54,68 @@ interface NeighborhoodData {
   c: number; // category number (901 for neighborhoods)
   l: string; // location coordinates separated by dash marks
   timestamp?: string | null; // timestamp when neighborhood was last updated
+}
+
+/** Parse freedom cell location string "zoom-lat-lng" (lng may be negative) to { lat, lng } or null */
+function parseCellLocation(location: string): { lat: number; lng: number } | null {
+  if (!location || typeof location !== 'string') return null;
+  const parts = location.split('-');
+  if (parts.length < 3) return null;
+  const lat = parseFloat(parts[1]);
+  const lng = parseFloat(parts.slice(2).join('-'));
+  if (isNaN(lat) || isNaN(lng)) return null;
+  return { lat, lng };
+}
+
+/** Reports current map bounds to parent when map moves (for filtering table and markers) */
+function MapBoundsReporter({ onBoundsChange }: { onBoundsChange: (bounds: L.LatLngBounds) => void }) {
+  const map = useMap();
+  useEffect(() => {
+    onBoundsChange(map.getBounds());
+  }, [map, onBoundsChange]);
+  useMapEvent('moveend', () => {
+    onBoundsChange(map.getBounds());
+  });
+  return null;
+}
+
+/** Renders markers for freedom cells that have valid lat/lng. Larger hit area and dot scales with zoom for easier clicking. */
+function FreedomCellMarkersLayer({
+  cells,
+  zoom,
+}: {
+  cells: Array<{ name: string; location: string; description?: string; creator?: string }>;
+  zoom: number;
+}) {
+  const hitSize = 44;
+  const anchor = hitSize / 2;
+  const dotSize = Math.min(24, Math.max(12, 12 + (zoom - 1) * 0.9));
+  const icon = L.divIcon({
+    className: 'freedom-cell-marker',
+    html: `<div style="width:${hitSize}px;height:${hitSize}px;display:flex;align-items:center;justify-content:center;cursor:pointer;"><div style="width:${dotSize}px;height:${dotSize}px;border-radius:50%;background:#28a745;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.35);pointer-events:none;"></div></div>`,
+    iconSize: [hitSize, hitSize],
+    iconAnchor: [anchor, anchor],
+  });
+  return (
+    <>
+      {cells.map((cell, index) => {
+        const pos = parseCellLocation(cell.location);
+        if (!pos) return null;
+        return (
+          <Marker
+            key={`${cell.creator ?? ''}-${cell.name}-${index}`}
+            position={[pos.lat, pos.lng]}
+            icon={icon}
+          >
+            <Popup>
+              <strong>{cell.name}</strong>
+              {cell.creator && <><br />{cell.creator}</>}
+            </Popup>
+          </Marker>
+        );
+      })}
+    </>
+  );
 }
 
 // SearchResultItem component
@@ -240,6 +302,7 @@ function App() {
   const [freedomCellsData, setFreedomCellsData] = useState<any[]>([]);
   const [freedomCellsLoading, setFreedomCellsLoading] = useState(false);
   const [freedomCellsError, setFreedomCellsError] = useState('');
+  const [mapBounds, setMapBounds] = useState<L.LatLngBounds | null>(null);
 
   const [isCheckingForGroupTransaction, setIsCheckingForGroupTransaction] =
     useState(false);
@@ -1451,7 +1514,14 @@ function App() {
 
   const panelStyles = getPanelStyles();
 
-  console.log('freedomCellsData', freedomCellsData);
+  // Freedom cells that fall within the current map bounds (when bounds available)
+  const cellsInBounds = useMemo(() => {
+    if (!mapBounds) return freedomCellsData;
+    return freedomCellsData.filter((cell) => {
+      const pos = parseCellLocation(cell.location);
+      return pos !== null && mapBounds.contains(pos);
+    });
+  }, [freedomCellsData, mapBounds]);
 
   // Debug effect to log neighborhood state changes
   useEffect(() => {
@@ -1908,6 +1978,8 @@ function App() {
                       mapRef={mapRef}
                     />
                     <QdnTileLayer fetchTileImage={fetchTileImage} />
+                    <MapBoundsReporter onBoundsChange={setMapBounds} />
+                    <FreedomCellMarkersLayer cells={cellsInBounds} zoom={zoom} />
                   </MapContainer>
                 )}
               </div>
@@ -3444,6 +3516,11 @@ function App() {
           </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>
+            {mapBounds && (
+              <p style={{ fontSize: '12px', color: panelStyles.color, marginBottom: '8px' }}>
+                Showing {cellsInBounds.length} of {freedomCellsData.length} cells in map view
+              </p>
+            )}
             <table
               style={{
                 width: '100%',
@@ -3521,7 +3598,7 @@ function App() {
                 </tr>
               </thead>
               <tbody>
-                {freedomCellsData.map((cell, index) => (
+                {cellsInBounds.map((cell, index) => (
                   <tr
                     key={index}
                     style={{
