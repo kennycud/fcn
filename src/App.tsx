@@ -663,21 +663,14 @@ function App() {
   const navigateToNeighborhood = () => {
     if (userNeighborhood && userNeighborhood.l) {
       const parts = userNeighborhood.l.split('-');
-      if (parts.length === 3) {
-        const newZoom = parseInt(parts[0]);
-        const newX = parseInt(parts[1]);
-        const newY = parseInt(parts[2]);
-        if (!isNaN(newZoom) && !isNaN(newX) && !isNaN(newY)) {
-          const center = tileToLatLng(newZoom, newX + 0.5, newY + 0.5);
-          mapRef.current?.setView(center, newZoom, { animate: false });
-          setZoom(newZoom);
-          setX(newX);
-          setY(newY);
-        } else {
-          alert('Invalid coordinates in neighborhood data');
-        }
+      const savedZoom = parseFloat(parts[0]);
+      const lat = parseFloat(parts[1]);
+      const lng = parseFloat(parts[2]);
+      console.log('details', savedZoom, lat, lng);
+      if (!isNaN(savedZoom) && !isNaN(lat) && !isNaN(lng)) {
+        mapRef.current?.setView([lat, lng], savedZoom, { animate: false });
       } else {
-        alert('Invalid location format in neighborhood data');
+        alert('Invalid coordinates in neighborhood data');
       }
     } else {
       alert('No neighborhood data available for navigation');
@@ -1387,12 +1380,18 @@ function App() {
         (item) => item.identifier === upperLeftIdentifier
       );
 
+      // Get the map center lat/lng and zoom from Leaflet
+      const mapCenter = mapRef.current?.getCenter();
+      const centerLat = mapCenter ? mapCenter.lat : 0;
+      const centerLng = mapCenter ? mapCenter.lng : 0;
+      const currentZoom = mapRef.current?.getZoom() ?? zoom;
+
       // Build the object with the specified structure
       const newHoodBuiltObject = {
         t: hoodTerm, // the term (user name + neighborhood)
         n: upperLeftMapping ? upperLeftMapping.name : 'Unknown', // the name from the upper left tile
         c: 901, // the category number (901 for neighborhoods)
-        l: `${zoom}-${x}-${y}`, // location coordinates separated by dash marks
+        l: `${currentZoom}-${centerLat}-${centerLng}`, // zoom, lat, lng separated by dashes
       };
 
       setHoodBuiltObject(newHoodBuiltObject);
@@ -1451,6 +1450,8 @@ function App() {
   };
 
   const panelStyles = getPanelStyles();
+
+  console.log('freedomCellsData', freedomCellsData);
 
   // Debug effect to log neighborhood state changes
   useEffect(() => {
@@ -1648,17 +1649,19 @@ function App() {
                     position: 'relative',
                   }}
                 >
-                  {userNeighborhood && userNeighborhood.t && userNeighborhood.l ? (
+                  {userNeighborhood &&
+                  userNeighborhood.t &&
+                  userNeighborhood.l ? (
                     (() => {
                       const parts = userNeighborhood.l.split('-');
-                      if (parts.length !== 3) return null;
-                      const hoodZoom = parseInt(parts[0], 10);
-                      const hoodX = parseInt(parts[1], 10);
-                      const hoodY = parseInt(parts[2], 10);
-                      if (isNaN(hoodZoom) || isNaN(hoodX) || isNaN(hoodY))
+                      const savedZoom = parseFloat(parts[0]);
+                      const lat = parseFloat(parts[1]);
+                      const lng = parseFloat(parts[2]);
+                      if (isNaN(savedZoom) || isNaN(lat) || isNaN(lng))
                         return null;
-                      const hoodCenter = tileToLatLng(hoodZoom, hoodX + 0.5, hoodY + 0.5);
-                      const hoodPreviewZoom = Math.max(1, hoodZoom - 1);
+                      const hoodCenter: L.LatLngExpression = { lat, lng };
+                      const hoodPreviewZoom = Math.max(1, savedZoom - 1);
+                      if (!hoodCenter) return null;
                       return (
                         <div
                           style={{
@@ -1667,34 +1670,45 @@ function App() {
                             overflow: 'hidden',
                             borderRadius: '4px',
                             border: '1px solid var(--modal-border-color, #444)',
+                            position: 'relative',
                           }}
                         >
-                          <MapContainer
-                            center={hoodCenter}
-                            zoom={hoodPreviewZoom}
-                            style={{ height: '100%', width: '100%' }}
-                            zoomControl={false}
-                            attributionControl={false}
-                            dragging={false}
-                            scrollWheelZoom={false}
-                            doubleClickZoom={false}
-                            touchZoom={false}
-                            keyboard={false}
-                            boxZoom={false}
-                            maxZoom={20}
-                            minZoom={1}
-                            maxBounds={[
-                              [-85.051129, -180],
-                              [85.051129, 180],
-                            ]}
-                            maxBoundsViscosity={1.0}
+                          <div
+                            style={{
+                              position: 'absolute',
+                              top: '-128px',
+                              left: '-128px',
+                              width: '512px',
+                              height: '512px',
+                            }}
                           >
-                            <SetPreviewView
+                            <MapContainer
                               center={hoodCenter}
                               zoom={hoodPreviewZoom}
-                            />
-                            <QdnTileLayer fetchTileImage={fetchTileImage} />
-                          </MapContainer>
+                              style={{ height: '100%', width: '100%' }}
+                              zoomControl={false}
+                              attributionControl={false}
+                              dragging={false}
+                              scrollWheelZoom={false}
+                              doubleClickZoom={false}
+                              touchZoom={false}
+                              keyboard={false}
+                              boxZoom={false}
+                              maxZoom={20}
+                              minZoom={1}
+                              maxBounds={[
+                                [-85.051129, -180],
+                                [85.051129, 180],
+                              ]}
+                              maxBoundsViscosity={1.0}
+                            >
+                              <SetPreviewView
+                                center={hoodCenter}
+                                zoom={hoodPreviewZoom}
+                              />
+                              <QdnTileLayer fetchTileImage={fetchTileImage} />
+                            </MapContainer>
+                          </div>
                         </div>
                       );
                     })()
@@ -2292,32 +2306,48 @@ function App() {
                 border: '1px solid var(--modal-border-color, #444)',
               }}
             >
-              <MapContainer
-                center={tileToLatLng(zoom, x + 0.5, y + 0.5)}
-                zoom={Math.max(1, zoom - 1)}
-                style={{ height: '100%', width: '100%' }}
-                zoomControl={false}
-                attributionControl={false}
-                dragging={false}
-                scrollWheelZoom={false}
-                doubleClickZoom={false}
-                touchZoom={false}
-                keyboard={false}
-                boxZoom={false}
-                maxZoom={20}
-                minZoom={1}
-                maxBounds={[
-                  [-85.051129, -180],
-                  [85.051129, 180],
-                ]}
-                maxBoundsViscosity={1.0}
+              <div
+                style={{
+                  position: 'absolute',
+                  top: '-128px',
+                  left: '-128px',
+                  width: '512px',
+                  height: '512px',
+                }}
               >
-                <SetPreviewView
-                  center={tileToLatLng(zoom, x + 0.5, y + 0.5)}
-                  zoom={Math.max(1, zoom - 1)}
-                />
-                <QdnTileLayer fetchTileImage={fetchTileImage} />
-              </MapContainer>
+                <MapContainer
+                  center={
+                    mapRef.current?.getCenter() ??
+                    tileToLatLng(zoom, x + 0.5, y + 0.5)
+                  }
+                  zoom={mapRef.current?.getZoom() ?? zoom}
+                  style={{ height: '100%', width: '100%' }}
+                  zoomControl={false}
+                  attributionControl={false}
+                  dragging={false}
+                  scrollWheelZoom={false}
+                  doubleClickZoom={false}
+                  touchZoom={false}
+                  keyboard={false}
+                  boxZoom={false}
+                  maxZoom={20}
+                  minZoom={1}
+                  maxBounds={[
+                    [-85.051129, -180],
+                    [85.051129, 180],
+                  ]}
+                  maxBoundsViscosity={1.0}
+                >
+                  <SetPreviewView
+                    center={
+                      mapRef.current?.getCenter() ??
+                      tileToLatLng(zoom, x + 0.5, y + 0.5)
+                    }
+                    zoom={Math.max(1, (mapRef.current?.getZoom() ?? zoom) - 1)}
+                  />
+                  <QdnTileLayer fetchTileImage={fetchTileImage} />
+                </MapContainer>
+              </div>
             </div>
 
             <div
@@ -3529,73 +3559,17 @@ function App() {
                               cell.location
                             );
 
-                            // Parse the location string (format: "zoom-x-y")
                             const parts = cell.location.split('-');
-
-                            if (parts.length !== 3) {
-                              console.error(
-                                'Invalid location format. Expected: zoom-x-y, got:',
-                                cell.location
-                              );
-                              showErrorModal(
-                                'Invalid location format. Expected format: zoom-x-y'
-                              );
-                              return;
-                            }
-
-                            const newZoom = parseInt(parts[0]);
-                            const newX = parseInt(parts[1]);
-                            const newY = parseInt(parts[2]);
-
-                            // Validate the parsed values
-                            if (isNaN(newZoom) || isNaN(newX) || isNaN(newY)) {
-                              console.error(
-                                'Invalid coordinates in location:',
-                                cell.location
-                              );
+                            const newZoom = parseFloat(parts[0]);
+                            const lat = parseFloat(parts[1]);
+                            const lng = parseFloat(parts[2]);
+                            if (isNaN(newZoom) || isNaN(lat) || isNaN(lng)) {
                               showErrorModal('Invalid coordinates in location');
                               return;
                             }
-
-                            if (newZoom < 1 || newZoom > 20) {
-                              console.error(
-                                'Invalid zoom level in location:',
-                                newZoom
-                              );
-                              showErrorModal(
-                                `Invalid zoom level: ${newZoom}. Must be between 1 and 20`
-                              );
-                              return;
-                            }
-
-                            if (newX < 0 || newY < 0) {
-                              console.error(
-                                'Invalid coordinates in location:',
-                                newX,
-                                newY
-                              );
-                              showErrorModal(
-                                `Invalid coordinates: X and Y must be non-negative`
-                              );
-                              return;
-                            }
-
-                            if (newX >= 2 ** newZoom || newY >= 2 ** newZoom) {
-                              console.error(
-                                'Coordinates out of bounds for zoom level:',
-                                { newX, newY, newZoom }
-                              );
-                              showErrorModal(
-                                `Coordinates out of bounds for zoom level ${newZoom}`
-                              );
-                              return;
-                            }
-
-                            const center = tileToLatLng(newZoom, newX + 0.5, newY + 0.5);
-                            mapRef.current?.setView(center, newZoom, { animate: false });
-                            setZoom(newZoom);
-                            setX(newX);
-                            setY(newY);
+                            mapRef.current?.setView([lat, lng], newZoom, {
+                              animate: false,
+                            });
                           } catch (error) {
                             console.error('Error processing location:', error);
                             showErrorModal(
