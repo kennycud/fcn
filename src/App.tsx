@@ -1,7 +1,19 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+} from 'react';
 import { objectToBase64, useGlobal } from 'qapp-core';
 import { useAtom } from 'jotai';
-import { MapContainer, Marker, Popup, useMap, useMapEvent } from 'react-leaflet';
+import {
+  MapContainer,
+  Marker,
+  Popup,
+  useMap,
+  useMapEvent,
+} from 'react-leaflet';
 import L from 'leaflet';
 
 // Add this import for the theme atom
@@ -57,7 +69,9 @@ interface NeighborhoodData {
 }
 
 /** Parse freedom cell location string "zoom-lat-lng" (lng may be negative) to { lat, lng } or null */
-function parseCellLocation(location: string): { lat: number; lng: number } | null {
+function parseCellLocation(
+  location: string
+): { lat: number; lng: number } | null {
   if (!location || typeof location !== 'string') return null;
   const parts = location.split('-');
   if (parts.length < 3) return null;
@@ -68,7 +82,11 @@ function parseCellLocation(location: string): { lat: number; lng: number } | nul
 }
 
 /** Reports current map bounds to parent when map moves (for filtering table and markers) */
-function MapBoundsReporter({ onBoundsChange }: { onBoundsChange: (bounds: L.LatLngBounds) => void }) {
+function MapBoundsReporter({
+  onBoundsChange,
+}: {
+  onBoundsChange: (bounds: L.LatLngBounds) => void;
+}) {
   const map = useMap();
   useEffect(() => {
     onBoundsChange(map.getBounds());
@@ -84,7 +102,12 @@ function FreedomCellMarkersLayer({
   cells,
   zoom,
 }: {
-  cells: Array<{ name: string; location: string; description?: string; creator?: string }>;
+  cells: Array<{
+    name: string;
+    location: string;
+    description?: string;
+    creator?: string;
+  }>;
   zoom: number;
 }) {
   const hitSize = 44;
@@ -109,7 +132,12 @@ function FreedomCellMarkersLayer({
           >
             <Popup>
               <strong>{cell.name}</strong>
-              {cell.creator && <><br />{cell.creator}</>}
+              {cell.creator && (
+                <>
+                  <br />
+                  {cell.creator}
+                </>
+              )}
             </Popup>
           </Marker>
         );
@@ -548,6 +576,8 @@ function App() {
   };
 
   // Function to fetch and process Freedom Cell data
+
+
   const fetchFreedomCellsData = async () => {
     setFreedomCellsLoading(true);
     setFreedomCellsError('');
@@ -571,12 +601,12 @@ function App() {
         try {
           // Get idx-cell data
           const cellResponse = await fetch(
-            `/arbitrary/indices/${resource.name}/idx-cell`
+            `/arbitrary/${resource.service}/${resource.name}/idx-cell`
           );
 
           // Get idx-hood data
           const hoodResponse = await fetch(
-            `/arbitrary/indices/${resource.name}/idx-hood`
+            `/arbitrary/${resource.service}/${resource.name}/idx-hood`
           );
 
           // If either response is empty, discard this resource
@@ -589,6 +619,8 @@ function App() {
 
           const cellData = await cellResponse.json();
           const hoodData = await hoodResponse.json();
+          console.log('Cell data:', cellData);
+          console.log('Hood data:', hoodData);
 
           if (
             !Array.isArray(cellData) ||
@@ -614,7 +646,7 @@ function App() {
           }
 
           const nameData = await nameResponse.json();
-
+          console.log('nameData', nameData);
           // Get groups data
           const groupsResponse = await fetch(`/groups/owner/${nameData.owner}`);
 
@@ -627,22 +659,22 @@ function App() {
 
           // Find the group that matches the cell's link (groupId)
           const matchingGroup = groupsData.find(
-            (group: any) => group.groupId.toString() === cellInfo.link
+            (group: any) => group.groupId.toString() === cellInfo?.l?.toString()
           );
 
           if (!matchingGroup) {
             console.log(
-              `Skipping ${resource.name}: no matching group found for groupId ${cellInfo.link}`
+              `Skipping ${resource.name}: no matching group found for groupId ${cellInfo.l}`
             );
             return null;
           }
 
           // Format the location from the hood data
-          const location = hoodInfo.link;
+          const location = hoodInfo.l;
 
           // Return the formatted data
           return {
-            name: cellInfo.name,
+            name: cellInfo.n,
             location: location,
             description: matchingGroup.description || '',
             creator: resource.name,
@@ -672,7 +704,6 @@ function App() {
       setFreedomCellsLoading(false);
     }
   };
-
   // Discover user neighborhood on component mount and when auth name changes
   useEffect(() => {
     console.log(
@@ -694,7 +725,7 @@ function App() {
         }
 
         const freedomCellResponse = await fetch(
-          `/arbitrary/indices/${auth.name}/idx-cell`
+          `/arbitrary/JSON/${auth.name}/idx-cell`
         );
 
         if (freedomCellResponse.ok) {
@@ -1494,6 +1525,69 @@ function App() {
 
       // Refresh the user's neighborhood data
       discoverUserNeighborhood();
+
+      // Update freedomCellsData state: update this user's cell location, or add a new item with group description
+      const newLocation = `${currentZoom}-${centerLat}-${centerLng}`;
+      const existingCell = freedomCellsData.find((cell) => cell.creator === userName);
+      if (existingCell) {
+        setFreedomCellsData((prev) =>
+          prev.map((cell) =>
+            cell.creator === userName ? { ...cell, location: newLocation } : cell
+          )
+        );
+      } else {
+        // Fetch group info for description (same as fetchFreedomCellsData)
+        let description = '';
+        let groupId: number | undefined;
+        let cellName = newHoodBuiltObject.n || `${userName}'s Cell`;
+        try {
+          const nameResponse = await fetch(`/names/${userName}`);
+          if (nameResponse.ok) {
+            const nameData = await nameResponse.json();
+            const cellResponse = await fetch(
+              `/arbitrary/JSON/${userName}/idx-cell`
+            );
+            if (cellResponse.ok) {
+              const cellData = await cellResponse.json();
+              const cellInfo =
+                Array.isArray(cellData) && cellData.length > 0
+                  ? cellData[0]
+                  : null;
+              if (cellInfo?.n) cellName = cellInfo.n;
+              const groupsResponse = await fetch(
+                `/groups/owner/${nameData.owner}`
+              );
+              if (groupsResponse.ok) {
+                const groupsData = await groupsResponse.json();
+                const matchingGroup =
+                  cellInfo?.l != null
+                    ? groupsData.find(
+                        (g: any) =>
+                          g.groupId?.toString() === cellInfo.l?.toString()
+                      )
+                    : null;
+                if (matchingGroup) {
+                  description = matchingGroup.description ?? '';
+                  groupId = matchingGroup.groupId;
+                }
+              }
+            }
+          }
+        } catch (_) {
+          // keep description '' and groupId undefined
+        }
+        setFreedomCellsData((prev) => [
+          ...prev,
+          {
+            name: cellName,
+            location: newLocation,
+            description,
+            creator: userName,
+            timeCreated: new Date().toLocaleString(),
+            ...(groupId !== undefined && { groupId }),
+          },
+        ]);
+      }
     } catch (error) {
       console.error('Error generating neighborhood identifier:', error);
       setHoodIndexError('Failed to generate neighborhood identifier');
@@ -1691,7 +1785,7 @@ function App() {
                       color: panelStyles.color,
                     }}
                   >
-                    Your Neighborhood1
+                    Your Neighborhood
                   </div>
                   {userNeighborhood && userNeighborhood.timestamp && (
                     <div
@@ -1979,7 +2073,10 @@ function App() {
                     />
                     <QdnTileLayer fetchTileImage={fetchTileImage} />
                     <MapBoundsReporter onBoundsChange={setMapBounds} />
-                    <FreedomCellMarkersLayer cells={cellsInBounds} zoom={zoom} />
+                    <FreedomCellMarkersLayer
+                      cells={cellsInBounds}
+                      zoom={zoom}
+                    />
                   </MapContainer>
                 )}
               </div>
@@ -2364,7 +2461,7 @@ function App() {
                 color: 'var(--modal-text-color, #e0e0e0)',
               }}
             >
-              Your Neighborhood2
+              Your Neighborhood
             </h2>
 
             <div
@@ -3517,8 +3614,15 @@ function App() {
         ) : (
           <div style={{ overflowX: 'auto' }}>
             {mapBounds && (
-              <p style={{ fontSize: '12px', color: panelStyles.color, marginBottom: '8px' }}>
-                Showing {cellsInBounds.length} of {freedomCellsData.length} cells in map view
+              <p
+                style={{
+                  fontSize: '12px',
+                  color: panelStyles.color,
+                  marginBottom: '8px',
+                }}
+              >
+                Showing {cellsInBounds.length} of {freedomCellsData.length}{' '}
+                cells in map view
               </p>
             )}
             <table
