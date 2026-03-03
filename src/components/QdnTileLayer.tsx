@@ -2,20 +2,33 @@ import { useEffect, useRef } from 'react';
 import { useMap } from 'react-leaflet';
 import L from 'leaflet';
 
-/** Convert tile coords (zoom, x, y) to Leaflet LatLng for map center */
+/**
+ * Convert tile coords (zoom, x, y) to Leaflet LatLng.
+ * Pass integer tile indices to get the top-left corner of that tile,
+ * or fractional values for arbitrary positions within the tile grid
+ * (e.g. x+0.5, y+0.5 for the center of a tile; x+1, y+1 for the
+ * corner between four tiles).
+ */
 export function tileToLatLng(z: number, x: number, y: number): L.LatLngLiteral {
   const n = Math.pow(2, z);
-  const lng = ((x + 0.5) / n) * 360 - 180;
-  const latRad = Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 0.5)) / n)));
+  const lng = (x / n) * 360 - 180;
+  const latRad = Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n)));
   return { lat: (latRad * 180) / Math.PI, lng };
 }
 
 /** Convert map center and zoom to tile indices (x, y) */
-export function latLngToTile(z: number, lat: number, lng: number): { x: number; y: number } {
+export function latLngToTile(
+  z: number,
+  lat: number,
+  lng: number
+): { x: number; y: number } {
   const n = Math.pow(2, z);
   const x = ((lng + 180) / 360) * n;
   const latRad = (lat * Math.PI) / 180;
-  const y = (1 - (Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI + 1) / 2) * n;
+  const y =
+    (1 -
+      (Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI + 1) / 2) *
+    n;
   return { x: Math.floor(x), y: Math.floor(y) };
 }
 
@@ -32,7 +45,14 @@ const MAX_ZOOM = 20;
 const MIN_ZOOM = 1;
 
 /** Syncs Leaflet map view with zoom/x/y state and vice versa */
-export function MapViewSync({ zoom, x, y, setZoom, setX, setY }: MapViewSyncProps) {
+export function MapViewSync({
+  zoom,
+  x,
+  y,
+  setZoom,
+  setX,
+  setY,
+}: MapViewSyncProps) {
   const map = useMap();
   const skipNextSyncRef = useRef(false);
   const stateFromMapRef = useRef(false);
@@ -49,7 +69,7 @@ export function MapViewSync({ zoom, x, y, setZoom, setX, setY }: MapViewSyncProp
     }
     skipNextSyncRef.current = true;
     const clampedZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
-    const center = tileToLatLng(clampedZoom, x, y);
+    const center = tileToLatLng(clampedZoom, x + 0.5, y + 0.5);
     map.setView(center, clampedZoom, { animate: false });
   }, [map, zoom, x, y]);
 
@@ -80,19 +100,42 @@ export function MapViewSync({ zoom, x, y, setZoom, setX, setY }: MapViewSyncProp
   return null;
 }
 
-export type FetchTileImage = (z: number, x: number, y: number) => Promise<string | null>;
+/** Sets the map view to the given center and zoom (e.g. for a preview map that must show a fixed view). */
+export function SetPreviewView({
+  center,
+  zoom,
+}: {
+  center: L.LatLngLiteral;
+  zoom: number;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    map.setView(center, zoom, { animate: false });
+  }, [map, center.lat, center.lng, zoom]);
+  return null;
+}
+
+export type FetchTileImage = (
+  z: number,
+  x: number,
+  y: number
+) => Promise<string | null>;
 
 interface QdnTileLayerProps {
   fetchTileImage: FetchTileImage;
 }
 
-type QdnGridLayerConstructor = new (options?: L.GridLayerOptions) => L.GridLayer;
+type QdnGridLayerConstructor = new (
+  options?: L.GridLayerOptions
+) => L.GridLayer;
 
 /**
  * Custom Leaflet GridLayer that fetches tile images asynchronously via QDN.
  * Each tile is requested with identifier `${z}-${x}-${y}` and the result (data URL or error) is set on the tile image.
  */
-function createQdnGridLayer(fetchTileImage: FetchTileImage): QdnGridLayerConstructor {
+function createQdnGridLayer(
+  fetchTileImage: FetchTileImage
+): QdnGridLayerConstructor {
   return L.GridLayer.extend({
     createTile(coords: L.Coords): HTMLElement {
       const tile = document.createElement('div');
@@ -112,7 +155,10 @@ function createQdnGridLayer(fetchTileImage: FetchTileImage): QdnGridLayerConstru
 
       fetchTileImage(coords.z, coords.x, coords.y)
         .then((src) => {
-          if (src && (src.startsWith('data:image/') || src.startsWith('blob:'))) {
+          if (
+            src &&
+            (src.startsWith('data:image/') || src.startsWith('blob:'))
+          ) {
             tile.textContent = '';
             tile.style.background = 'transparent';
             tile.style.border = 'none';
@@ -129,7 +175,10 @@ function createQdnGridLayer(fetchTileImage: FetchTileImage): QdnGridLayerConstru
             tile.style.color = '#555';
             tile.style.whiteSpace = 'pre-wrap';
             tile.style.wordBreak = 'break-all';
-            tile.textContent = src && (src.startsWith('Error') || src.startsWith('Missing')) ? src : (src || 'Loading…');
+            tile.textContent =
+              src && (src.startsWith('Error') || src.startsWith('Missing'))
+                ? src
+                : src || 'Loading…';
           }
         })
         .catch(() => {
