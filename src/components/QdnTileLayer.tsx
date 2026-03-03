@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react';
-import { useMap } from 'react-leaflet';
+import { useCallback, useEffect, useRef, MutableRefObject } from 'react';
+import { useMap, useMapEvent } from 'react-leaflet';
 import L from 'leaflet';
 
 /**
@@ -39,6 +39,7 @@ export interface MapViewSyncProps {
   setZoom: (z: number) => void;
   setX: (x: number) => void;
   setY: (y: number) => void;
+  mapRef?: MutableRefObject<L.Map | null>;
 }
 
 const MAX_ZOOM = 20;
@@ -52,6 +53,7 @@ export function MapViewSync({
   setZoom,
   setX,
   setY,
+  mapRef,
 }: MapViewSyncProps) {
   const map = useMap();
   const skipNextSyncRef = useRef(false);
@@ -60,7 +62,8 @@ export function MapViewSync({
   useEffect(() => {
     map.setMaxZoom(MAX_ZOOM);
     map.setMinZoom(MIN_ZOOM);
-  }, [map]);
+    if (mapRef) mapRef.current = map;
+  }, [map, mapRef]);
 
   useEffect(() => {
     if (stateFromMapRef.current) {
@@ -73,29 +76,26 @@ export function MapViewSync({
     map.setView(center, clampedZoom, { animate: false });
   }, [map, zoom, x, y]);
 
-  useEffect(() => {
-    const onMoveEnd = () => {
-      if (skipNextSyncRef.current) {
-        skipNextSyncRef.current = false;
-        return;
-      }
-      stateFromMapRef.current = true;
-      let z = map.getZoom();
-      z = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
-      const c = map.getCenter();
-      const { x: tx, y: ty } = latLngToTile(z, c.lat, c.lng);
-      const maxTile = Math.pow(2, z);
-      const clampedX = Math.max(0, Math.min(tx, maxTile - 1));
-      const clampedY = Math.max(0, Math.min(ty, maxTile - 1));
-      setZoom(z);
-      setX(clampedX);
-      setY(clampedY);
-    };
-    map.on('moveend', onMoveEnd);
-    return () => {
-      map.off('moveend', onMoveEnd);
-    };
+  const syncStateFromMap = useCallback(() => {
+    if (skipNextSyncRef.current) {
+      skipNextSyncRef.current = false;
+      return;
+    }
+    stateFromMapRef.current = true;
+    let z = map.getZoom();
+    z = Math.round(z);
+    z = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
+    const c = map.getCenter();
+    const { x: tx, y: ty } = latLngToTile(z, c.lat, c.lng);
+    const maxTile = Math.pow(2, z);
+    const clampedX = Math.max(0, Math.min(tx, maxTile - 1));
+    const clampedY = Math.max(0, Math.min(ty, maxTile - 1));
+    setZoom(z);
+    setX(clampedX);
+    setY(clampedY);
   }, [map, setZoom, setX, setY]);
+
+  useMapEvent('moveend', syncStateFromMap);
 
   return null;
 }

@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { objectToBase64, useGlobal } from 'qapp-core';
 import { useAtom } from 'jotai';
 import { MapContainer } from 'react-leaflet';
+import L from 'leaflet';
 
 // Add this import for the theme atom
 import { EnumTheme, themeAtom } from './state/global/system';
@@ -158,6 +159,7 @@ function App() {
   const [x, setX] = useState(0);
   const [y, setY] = useState(0);
   const [zoom, setZoom] = useState(1);
+  const mapRef = useRef<L.Map | null>(null);
   const [identifiers, setIdentifiers] = useState<IdentifierMapping[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -659,48 +661,25 @@ function App() {
 
   // Function to navigate to the user's neighborhood
   const navigateToNeighborhood = () => {
-    console.log(
-      'navigateToNeighborhood called, userNeighborhood:',
-      userNeighborhood
-    );
-
     if (userNeighborhood && userNeighborhood.l) {
-      console.log('Neighborhood location string:', userNeighborhood.l);
-
-      // Parse the location string (format: "zoom-x-y")
       const parts = userNeighborhood.l.split('-');
-      console.log('Location parts:', parts);
-
       if (parts.length === 3) {
         const newZoom = parseInt(parts[0]);
         const newX = parseInt(parts[1]);
         const newY = parseInt(parts[2]);
-
-        console.log('Parsed coordinates:', { newZoom, newX, newY });
-
-        // Validate the parsed values
         if (!isNaN(newZoom) && !isNaN(newX) && !isNaN(newY)) {
-          console.log('Coordinates are valid, setting new location');
-
+          const center = tileToLatLng(newZoom, newX + 0.5, newY + 0.5);
+          mapRef.current?.setView(center, newZoom, { animate: false });
           setZoom(newZoom);
           setX(newX);
           setY(newY);
-
-          console.log('Set new coordinates, current state:', {
-            zoom: newZoom,
-            x: newX,
-            y: newY,
-          });
         } else {
-          console.error('Invalid coordinates in neighborhood data');
           alert('Invalid coordinates in neighborhood data');
         }
       } else {
-        console.error('Invalid location format in neighborhood data');
         alert('Invalid location format in neighborhood data');
       }
     } else {
-      console.log('No neighborhood data available for navigation');
       alert('No neighborhood data available for navigation');
     }
   };
@@ -834,10 +813,11 @@ function App() {
       }
 
       // Update the state with new values
-      console.log('Navigating to:', { zoom: newZoom, x: newX, y: newY });
       setZoom(newZoom);
       setX(newX);
       setY(newY);
+      const center = tileToLatLng(newZoom, newX + 0.5, newY + 0.5);
+      mapRef.current?.setView(center, newZoom, { animate: false });
     } catch (error) {
       console.error('Error processing link:', error);
       alert('Error processing link coordinates');
@@ -923,25 +903,20 @@ function App() {
     }
   }, [auth?.address, fetchFollowedNames]);
 
-  const handleUpdateCoordinates = (
-    newX: React.SetStateAction<number>,
-    newY: React.SetStateAction<number>
-  ) => {
-    setX(newX);
-    setY(newY);
+  const handlePan = (dx: number, dy: number) => {
+    const tileSize = 256;
+    mapRef.current?.panBy([dx * tileSize, dy * tileSize], { animate: true });
   };
 
   const handleZoomIn = () => {
-    if (zoom < 20 && x * 2 < 2 ** (zoom + 1) && y * 2 < 2 ** (zoom + 1)) {
-      setZoom((prevZoom) => prevZoom + 1);
-      handleUpdateCoordinates(x * 2 + 1, y * 2 + 1);
+    if (zoom < 20) {
+      mapRef.current?.zoomIn(1);
     }
   };
 
   const handleZoomOut = () => {
     if (zoom > 1) {
-      setZoom((prevZoom) => prevZoom - 1);
-      handleUpdateCoordinates(Math.floor(x / 2), Math.floor(y / 2));
+      mapRef.current?.zoomOut(1);
     }
   };
 
@@ -954,9 +929,7 @@ function App() {
       newX < 0 ||
       newX >= 2 ** currentZoom ||
       newY < 0 ||
-      newY >= 2 ** currentZoom ||
-      currentZoom <= 1 ||
-      currentZoom >= 20
+      newY >= 2 ** currentZoom
     );
   };
 
@@ -1918,6 +1891,7 @@ function App() {
                       setZoom={setZoom}
                       setX={setX}
                       setY={setY}
+                      mapRef={mapRef}
                     />
                     <QdnTileLayer fetchTileImage={fetchTileImage} />
                   </MapContainer>
@@ -1945,20 +1919,14 @@ function App() {
               >
                 <button
                   onClick={handleZoomIn}
-                  disabled={
-                    isButtonDisabled(1, 1, zoom + 1) ||
-                    addressNames.length === 0
-                  }
+                  disabled={zoom >= 20 || addressNames.length === 0}
                   className="zoom-button zoom-plus"
                   title="Zoom In"
                   style={{ borderRadius: '4px 4px 0 0' }}
                 ></button>
                 <button
                   onClick={handleZoomOut}
-                  disabled={
-                    isButtonDisabled(1, 1, zoom - 1) ||
-                    addressNames.length === 0
-                  }
+                  disabled={zoom <= 1 || addressNames.length === 0}
                   className="zoom-button zoom-minus"
                   title="Zoom Out"
                   style={{ borderRadius: '0 0 4px 4px', marginTop: '1px' }}
@@ -1967,7 +1935,7 @@ function App() {
 
               {/* Arrow Controls - Centered on Edges */}
               <button
-                onClick={() => handleUpdateCoordinates(x, y - 1)}
+                onClick={() => handlePan(0, -1)}
                 disabled={
                   isButtonDisabled(x, y - 1, zoom) || addressNames.length === 0
                 }
@@ -1982,7 +1950,7 @@ function App() {
               ></button>
 
               <button
-                onClick={() => handleUpdateCoordinates(x - 1, y)}
+                onClick={() => handlePan(-1, 0)}
                 disabled={
                   isButtonDisabled(x - 1, y, zoom) || addressNames.length === 0
                 }
@@ -1997,9 +1965,9 @@ function App() {
               ></button>
 
               <button
-                onClick={() => handleUpdateCoordinates(x + 1, y)}
+                onClick={() => handlePan(1, 0)}
                 disabled={
-                  isButtonDisabled(x + 2, y, zoom) || addressNames.length === 0
+                  isButtonDisabled(x + 1, y, zoom) || addressNames.length === 0
                 }
                 className="arrow-button arrow-right"
                 title="Pan Right"
@@ -2012,9 +1980,9 @@ function App() {
               ></button>
 
               <button
-                onClick={() => handleUpdateCoordinates(x, y + 1)}
+                onClick={() => handlePan(0, 1)}
                 disabled={
-                  isButtonDisabled(x, y + 2, zoom) || addressNames.length === 0
+                  isButtonDisabled(x, y + 1, zoom) || addressNames.length === 0
                 }
                 className="arrow-button arrow-down"
                 title="Pan Down"
@@ -3623,12 +3591,8 @@ function App() {
                               return;
                             }
 
-                            // Update the state with new values
-                            console.log('Navigating to:', {
-                              zoom: newZoom,
-                              x: newX,
-                              y: newY,
-                            });
+                            const center = tileToLatLng(newZoom, newX + 0.5, newY + 0.5);
+                            mapRef.current?.setView(center, newZoom, { animate: false });
                             setZoom(newZoom);
                             setX(newX);
                             setY(newY);
