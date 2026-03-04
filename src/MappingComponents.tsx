@@ -61,39 +61,103 @@ interface ImageGridProps {
   containerRef: React.RefObject<HTMLDivElement | null>;
 }
 
+/**
+ * Formats latitude with N/S suffix and rounded to nearest integer.
+ */
+function formatLat(lat: number): string {
+  const rounded = Math.round(lat);
+  if (rounded >= 0) return `${rounded}N`;
+  return `${Math.abs(rounded)}S`;
+}
+
+/**
+ * Formats longitude with E/W suffix and rounded to nearest integer.
+ */
+function formatLng(lng: number): string {
+  const rounded = Math.round(lng);
+  if (rounded >= 0) return `${rounded}E`;
+  return `${Math.abs(rounded)}W`;
+}
+
 // SearchResultItem component
 const SearchResultItem = ({ result, onLinkClick }: SearchResultItemProps) => {
+  const scoreValue = typeof result.score === 'number' ? Math.round(result.score * 100) : 0;
+  // We need a basic parse for the display string
+  let displayCoords = '';
+  if (result.link && typeof result.link === 'string') {
+    const parts = result.link.split('-');
+    if (parts.length >= 3) {
+      let lat: number | null = null;
+      let lng: number | null = null;
+      let negateNext = false;
+      for (let i = 1; i < parts.length; i++) {
+        if (parts[i] === '') {
+          negateNext = true;
+          continue;
+        }
+        const val = parseFloat(parts[i]);
+        if (!isNaN(val)) {
+          const num = negateNext ? -val : val;
+          negateNext = false;
+          if (lat === null) lat = num;
+          else if (lng === null) {
+            lng = num;
+            break;
+          }
+        }
+      }
+      if (lat !== null && lng !== null) {
+        displayCoords = `${formatLat(lat)}, ${formatLng(lng)}`;
+      }
+    }
+  }
+
   return (
     <div style={{
       marginBottom: '3px',
       paddingBottom: '3px',
       borderBottom: '1px solid #eee',
       display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'center'
+      flexDirection: 'column',
+      alignItems: 'stretch'
     }}>
       <div style={{ flex: 1 }}>
-        {result.name}
-      </div>
-      <div style={{ flex: 1, textAlign: 'right' }}>
         {result.link ? (
           <button
-            // Fixed: Explicitly pass result.link which is now guaranteed to be a string
             onClick={() => onLinkClick(result.link, result.name)}
             style={{
-              padding: '2px 6px',
-              backgroundColor: '#007bff',
+              width: '100%',
+              padding: '8px 16px',
+              backgroundColor: '#28a745',
               color: 'white',
               border: 'none',
-              borderRadius: '3px',
+              borderRadius: '4px',
               cursor: 'pointer',
-              fontSize: '11px',
-              textDecoration: 'none',
-              display: 'inline-block'
+              fontSize: '16px',
+              fontWeight: 'bold',
+              marginTop: '10px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center'
             }}
             title={`Go to location: ${result.link}`}
           >
-            {result.link}
+            <div style={{ flex: 1, textAlign: 'left' }}>
+              {displayCoords}
+            </div>
+            <span
+              style={{
+                flex: 1,
+                textAlign: 'right',
+                backgroundColor: 'rgba(0,0,0,0.2)',
+                padding: '2px 8px',
+                borderRadius: '12px',
+                fontSize: '14px',
+                marginLeft: '8px',
+              }}
+            >
+              Score: {scoreValue}%
+            </span>
           </button>
         ) : (
           <span style={{ color: '#999', fontStyle: 'italic', fontSize: '11px' }}>No link</span>

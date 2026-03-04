@@ -83,7 +83,7 @@ interface NeighborhoodData {
  * Returns { zoom, lat, lng } or null. Handles positive and negative coordinates.
  */
 function parseLocationString(
-  location: string
+  location: string | undefined
 ): { zoom: number; lat: number; lng: number } | null {
   if (!location || typeof location !== 'string') return null;
   const parts = location.split('-');
@@ -185,8 +185,29 @@ function FreedomCellMarkersLayer({
   );
 }
 
+/**
+ * Formats latitude with N/S suffix and rounded to nearest integer.
+ */
+function formatLat(lat: number): string {
+  const rounded = Math.round(lat);
+  if (rounded >= 0) return `${rounded}N`;
+  return `${Math.abs(rounded)}S`;
+}
+
+/**
+ * Formats longitude with E/W suffix and rounded to nearest integer.
+ */
+function formatLng(lng: number): string {
+  const rounded = Math.round(lng);
+  if (rounded >= 0) return `${rounded}E`;
+  return `${Math.abs(rounded)}W`;
+}
+
 // SearchResultItem component
 const SearchResultItem = ({ result, onLinkClick }: SearchResultItemProps) => {
+  const parsed = parseLocationString(result.link);
+  const scoreValue = typeof result.score === 'number' ? Math.round(result.score * 100) : 0;
+  
   return (
     <div
       style={{
@@ -194,30 +215,47 @@ const SearchResultItem = ({ result, onLinkClick }: SearchResultItemProps) => {
         paddingBottom: '3px',
         borderBottom: '1px solid #eee',
         display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
+        flexDirection: 'column',
+        alignItems: 'stretch',
       }}
     >
-      <div style={{ flex: 1 }}>{result.name}</div>
-      <div style={{ flex: 1, textAlign: 'right' }}>
+      <div style={{ flex: 1 }}>
         {result.link ? (
           <button
-            // Fixed: Explicitly pass result.link which is now guaranteed to be a string
             onClick={() => onLinkClick(result.link, result.name)}
             style={{
-              padding: '2px 6px',
-              backgroundColor: '#007bff',
+              width: '100%',
+              backgroundColor: '#28a745',
               color: 'white',
               border: 'none',
-              borderRadius: '3px',
+              borderRadius: '4px',
+              padding: '8px 16px',
+              fontSize: '16px',
+              fontWeight: 'bold',
               cursor: 'pointer',
-              fontSize: '11px',
-              textDecoration: 'none',
-              display: 'inline-block',
+              marginTop: '10px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
             }}
             title={`Go to location: ${result.link}`}
           >
-            {result.link}
+            <div style={{ flex: 1, textAlign: 'left' }}>
+              {parsed ? `${formatLat(parsed.lat)}, ${formatLng(parsed.lng)}` : ''}
+            </div>
+            <span
+              style={{
+                flex: 1,
+                textAlign: 'right',
+                backgroundColor: 'rgba(0,0,0,0.2)',
+                padding: '2px 8px',
+                borderRadius: '12px',
+                fontSize: '14px',
+                marginLeft: '8px',
+              }}
+            >
+              Score: {scoreValue}%
+            </span>
           </button>
         ) : (
           <span
@@ -294,6 +332,7 @@ function App() {
 
   // States for the Search form
   const [searchQueryTerm, setSearchQueryTerm] = useState('');
+  const [lastSubmittedTerm, setLastSubmittedTerm] = useState('');
   const [searchQueryError, setSearchQueryError] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -301,9 +340,10 @@ function App() {
   // States for the Index form
   const [indexTerm, setIndexTerm] = useState('');
   const [indexError, setIndexError] = useState('');
-  const [indexIdentifier, setIndexIdentifier] = useState<string>('');
+  const [, setIndexIdentifier] = useState<string>('');
   const [isGeneratingIdentifier, setIsGeneratingIdentifier] = useState(false);
-  const [builtObject, setBuiltObject] = useState<any>(null);
+  const [, setBuiltObject] = useState<any>(null);
+  const [showIndexSuccess, setShowIndexSuccess] = useState(false);
 
   // New state for neighborhood images
   // States for the Set Neighborhood wizard
@@ -845,7 +885,7 @@ function App() {
       const data = await response.json();
       console.log('Raw search results:', data);
 
-      // Filter results by category = 9
+      // Filter results by category = 977
       const filteredResults = Array.isArray(data)
         ? data.filter((result) => result.category === 977)
         : [];
@@ -864,6 +904,7 @@ function App() {
 
       // Set the filtered and sorted search results
       setSearchResults(sortedResults);
+      setLastSubmittedTerm(queryTerm);
     } catch (error) {
       console.error('Error searching indices:', error);
       setSearchQueryError(
@@ -873,9 +914,6 @@ function App() {
     } finally {
       setIsSearching(false);
     }
-
-    // Clear the search term input
-    setSearchQueryTerm('');
   };
 
   const handleButtonMouseOver = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -900,6 +938,9 @@ function App() {
 
     try {
       console.log('Clicked link:', link, 'from result:', resultName);
+
+      // Hide the search panel when a result is clicked
+      setShowSearchPanel(false);
 
       const parsed = parseLocationString(link);
       if (parsed) {
@@ -1407,6 +1448,7 @@ function App() {
     setIndexError('');
     setIndexIdentifier('');
     setBuiltObject(null);
+    setShowIndexSuccess(false);
     setIsGeneratingIdentifier(true);
 
     // Convert term to lowercase and validate
@@ -1486,6 +1528,8 @@ function App() {
         identifier: prefixedIdentifier,
         base64: dataToBase,
       });
+
+      setShowIndexSuccess(true);
     } catch (error) {
       console.error('Error generating identifier:', error);
       setIndexError('Failed to generate identifier');
@@ -3511,7 +3555,7 @@ function App() {
               borderRadius: '8px',
               padding: '20px',
               width: '90%',
-              maxWidth: '600px',
+              maxWidth: '675px',
               maxHeight: '80vh',
               overflow: 'auto',
               boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
@@ -3570,28 +3614,53 @@ function App() {
                 >
                   Search Term:
                 </label>
-                <input
-                  type="text"
-                  value={searchQueryTerm}
-                  onChange={(e) => setSearchQueryTerm(e.target.value)}
-                  placeholder="Enter search term"
-                  disabled={isSearching}
-                  autoFocus
-                  style={{
-                    width: '100%',
-                    padding: '8px',
-                    border: '1px solid #ccc',
-                    borderRadius: '4px',
-                    fontSize: '14px',
-                    backgroundColor:
-                      theme === EnumTheme.DARK
-                        ? '#444'
-                        : isSearching
-                          ? '#f5f5f5'
-                          : 'white',
-                    color: theme === EnumTheme.DARK ? '#e0e0e0' : '#333',
-                  }}
-                />
+                <div style={{ display: 'flex', gap: '5px' }}>
+                  <input
+                    type="text"
+                    value={searchQueryTerm}
+                    onChange={(e) => setSearchQueryTerm(e.target.value)}
+                    placeholder="Enter search term"
+                    disabled={isSearching}
+                    autoFocus
+                    style={{
+                      flex: 1,
+                      padding: '8px',
+                      border: '1px solid #ccc',
+                      borderRadius: '4px',
+                      fontSize: '14px',
+                      backgroundColor:
+                        theme === EnumTheme.DARK
+                          ? '#444'
+                          : isSearching
+                            ? '#f5f5f5'
+                            : 'white',
+                      color: theme === EnumTheme.DARK ? '#e0e0e0' : '#333',
+                    }}
+                  />
+                  {searchQueryTerm && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchQueryTerm('');
+                        setLastSubmittedTerm('');
+                        setSearchResults([]);
+                        setSearchQueryError('');
+                      }}
+                      style={{
+                        padding: '0 8px',
+                        background: 'none',
+                        border: '1px solid #ccc',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        color: 'var(--modal-text-color, #e0e0e0)',
+                        fontSize: '14px',
+                      }}
+                      title="Clear"
+                    >
+                      &times;
+                    </button>
+                  )}
+                </div>
               </div>
               <button
                 type="submit"
@@ -3625,16 +3694,26 @@ function App() {
                 {searchQueryError}
               </div>
             )}
-
+            {lastSubmittedTerm && (
+              <div
+                style={{
+                  marginBottom: '10px',
+                  padding: '5px 10px',
+                  backgroundColor: 'rgba(0,0,0,0.05)',
+                  borderRadius: '4px',
+                  fontSize: '14px',
+                  color: 'var(--modal-text-color, #e0e0e0)',
+                  borderLeft: '4px solid #4caf50',
+                }}
+              >
+                <strong>{searchResults.length}</strong> Result(s) for "
+                <strong>{lastSubmittedTerm}</strong>"
+              </div>
+            )}
             <SearchResultsList
               searchResults={searchResults}
               onLinkClick={handleLinkClick}
             />
-
-            <div style={{ marginTop: '10px', fontSize: '12px', color: '#666' }}>
-              Search indices for terms - filtered by category 9, sorted by score
-              (descending). Click links to navigate.
-            </div>
           </div>
         </div>
       )}
@@ -3778,8 +3857,8 @@ function App() {
               </div>
             )}
 
-            {/* Display Index Identifier */}
-            {indexIdentifier && (
+            {/* Display Success Message */}
+            {showIndexSuccess && (
               <div
                 style={{
                   marginBottom: '15px',
@@ -3789,57 +3868,11 @@ function App() {
                   border: '1px solid #c3e6cb',
                   borderRadius: '4px',
                   fontSize: '14px',
+                  textAlign: 'center',
+                  fontWeight: 'bold',
                 }}
               >
-                <div style={{ fontWeight: 'bold', marginBottom: '5px' }}>
-                  Index Identifier:
-                </div>
-                <div
-                  style={{
-                    wordBreak: 'break-all',
-                    fontFamily: 'monospace',
-                    fontSize: '12px',
-                    padding: '5px',
-                    backgroundColor: 'rgba(255, 255, 255, 0.5)',
-                    borderRadius: '3px',
-                    border: '1px solid #b8daff',
-                  }}
-                >
-                  {indexIdentifier}
-                </div>
-              </div>
-            )}
-
-            {/* Display Built Object */}
-            {builtObject && (
-              <div
-                style={{
-                  marginBottom: '15px',
-                  padding: '10px',
-                  backgroundColor: '#cce5ff',
-                  color: '#004085',
-                  border: '1px solid #99d6ff',
-                  borderRadius: '4px',
-                  fontSize: '14px',
-                }}
-              >
-                <div style={{ fontWeight: 'bold', marginBottom: '5px' }}>
-                  Built Object:
-                </div>
-                <div
-                  style={{
-                    wordBreak: 'break-all',
-                    fontFamily: 'monospace',
-                    fontSize: '12px',
-                    padding: '5px',
-                    backgroundColor: 'rgba(255, 255, 255, 0.5)',
-                    borderRadius: '3px',
-                    border: '1px solid #b8daff',
-                    whiteSpace: 'pre-wrap',
-                  }}
-                >
-                  {JSON.stringify(builtObject, null, 2)}
-                </div>
+                Index Created Successfully!
               </div>
             )}
 
