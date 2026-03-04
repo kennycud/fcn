@@ -1,33 +1,43 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { objectToBase64, useGlobal } from 'qapp-core';
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+} from 'react';
+import { objectToBase64, Spacer, useGlobal } from 'qapp-core';
 import { useAtom } from 'jotai';
+import {
+  MapContainer,
+  Marker,
+  Popup,
+  useMap,
+  useMapEvent,
+} from 'react-leaflet';
+import L from 'leaflet';
+import Dialog from '@mui/material/Dialog';
+import DialogTitle from '@mui/material/DialogTitle';
+import DialogContent from '@mui/material/DialogContent';
+import DialogActions from '@mui/material/DialogActions';
+import Button from '@mui/material/Button';
+import CircularProgress from '@mui/material/CircularProgress';
+import FormControl from '@mui/material/FormControl';
+import Select from '@mui/material/Select';
+import MenuItem from '@mui/material/MenuItem';
 
 // Add this import for the theme atom
 import { EnumTheme, themeAtom } from './state/global/system';
+import {
+  QdnTileLayer,
+  MapViewSync,
+  SetPreviewView,
+  tileToLatLng,
+  latLngToTile,
+} from './components/QdnTileLayer';
 
 interface IdentifierMapping {
   identifier: string;
   name: string;
-}
-
-interface ImageTileProps {
-  image: string | null;
-  index: number;
-  loading: boolean;
-  zoom: number;
-  x: number;
-  y: number;
-  onTileClick: (event: React.MouseEvent<HTMLDivElement>, identifier: string) => void;
-}
-
-interface ImageGridProps {
-  images: Array<string | null>;
-  imageLoading: boolean[];
-  zoom: number;
-  x: number;
-  y: number;
-  onTileClick: (event: React.MouseEvent<HTMLDivElement>, identifier: string) => void;
-  containerRef: React.RefObject<HTMLDivElement | null>;
 }
 
 // Define interfaces for our component props
@@ -68,118 +78,127 @@ interface NeighborhoodData {
   timestamp?: string | null; // timestamp when neighborhood was last updated
 }
 
-// ImageTile component
-const ImageTile = ({
-                     image,
-                     index,
-                     loading,
-                     zoom,
-                     x,
-                     y,
-                     onTileClick
-                   }: ImageTileProps) => {
-  return (
-    <div
-      key={index}
-      style={{
-        width: '256px',
-        height: '256px',
-        backgroundColor: 'transparent',
-        display: 'flex',
-        justifyContent: 'center',
-        alignItems: 'center',
-        fontSize: '24px',
-        textAlign: 'center',
-        position: 'relative'
-      }}
-      onClick={(event) => onTileClick(event, `${zoom}-${x + (index % 2)}-${y + Math.floor(index / 2)}`)}
-    >
-      {loading ? (
-        <div className="spinner"></div>
-      ) : (
-        <>
-          {typeof image === 'string' && image.startsWith('data:image/png;base64,') ? (
-            <img src={image} alt={`Tile ${index}`} style={{ width: '100%', height: '100%' }} />
-          ) : (
-            <div style={{ whiteSpace: 'pre' }}>{image}</div>
-          )}
-        </>
-      )}
-    </div>
-  );
-};
-
-// ImageGrid component
-const ImageGrid = ({
-                     images,
-                     imageLoading,
-                     zoom,
-                     x,
-                     y,
-                     onTileClick,
-                     containerRef
-                   }: ImageGridProps) => {
-  // Check if all images are identical error strings
-  const isAllSameError =
-    images.length === 4 &&
-    images.every(
-      (img, _i, arr) =>
-        typeof img === 'string' &&
-        (img.startsWith('Error') || img.startsWith('Missing')) &&
-        img === arr[0]
-    );
-
-  if (isAllSameError) {
-    return (
-      <div ref={containerRef} style={{ 
-        width: '512px', 
-        height: '512px', 
-        display: 'flex', 
-        justifyContent: 'center', 
-        alignItems: 'center', 
-        fontSize: '24px', 
-        textAlign: 'center', 
-        whiteSpace: 'pre',
-        backgroundColor: 'rgba(0,0,0,0.05)',
-        borderRadius: '8px'
-      }}>
-        {images[0]}
-      </div>
-    );
+/**
+ * Parse "zoom-lat-lng" string where lat/lng may be negative (e.g. 12--35.11--120.57).
+ * Returns { zoom, lat, lng } or null. Handles positive and negative coordinates.
+ */
+function parseLocationString(
+  location: string
+): { zoom: number; lat: number; lng: number } | null {
+  if (!location || typeof location !== 'string') return null;
+  const parts = location.split('-');
+  if (parts.length < 3) return null;
+  const zoom = parseFloat(parts[0]);
+  if (isNaN(zoom)) return null;
+  let lat: number | null = null;
+  let lng: number | null = null;
+  let negateNext = false;
+  for (let i = 1; i < parts.length; i++) {
+    if (parts[i] === '') {
+      negateNext = true;
+      continue;
+    }
+    const val = parseFloat(parts[i]);
+    if (isNaN(val)) return null;
+    const num = negateNext ? -val : val;
+    negateNext = false;
+    if (lat === null) lat = num;
+    else if (lng === null) {
+      lng = num;
+      break;
+    }
   }
+  if (lat === null || lng === null) return null;
+  return { zoom, lat, lng };
+}
 
+/** Parse freedom cell location "zoom-lat-lng" to { lat, lng } or null (uses parseLocationString). */
+function parseCellLocation(
+  location: string
+): { lat: number; lng: number } | null {
+  const parsed = parseLocationString(location);
+  return parsed ? { lat: parsed.lat, lng: parsed.lng } : null;
+}
+
+/** Reports current map bounds to parent when map moves (for filtering table and markers) */
+function MapBoundsReporter({
+  onBoundsChange,
+}: {
+  onBoundsChange: (bounds: L.LatLngBounds) => void;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    onBoundsChange(map.getBounds());
+  }, [map, onBoundsChange]);
+  useMapEvent('moveend', () => {
+    onBoundsChange(map.getBounds());
+  });
+  return null;
+}
+
+/** Renders markers for freedom cells that have valid lat/lng. Larger hit area and dot scales with zoom for easier clicking. */
+function FreedomCellMarkersLayer({
+  cells,
+  zoom,
+}: {
+  cells: Array<{
+    name: string;
+    location: string;
+    description?: string;
+    creator?: string;
+  }>;
+  zoom: number;
+}) {
+  const hitSize = 44;
+  const anchor = hitSize / 2;
+  const dotSize = Math.min(24, Math.max(12, 12 + (zoom - 1) * 0.9));
+  const icon = L.divIcon({
+    className: 'freedom-cell-marker',
+    html: `<div style="width:${hitSize}px;height:${hitSize}px;display:flex;align-items:center;justify-content:center;cursor:pointer;"><div style="width:${dotSize}px;height:${dotSize}px;border-radius:50%;background:#28a745;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.35);pointer-events:none;"></div></div>`,
+    iconSize: [hitSize, hitSize],
+    iconAnchor: [anchor, anchor],
+  });
   return (
-    <div ref={containerRef} style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 256px)', gridTemplateRows: 'repeat(2, 256px)', gap: '0', position: 'relative' }}>
-      {images.map((image, index) => (
-        <ImageTile
-          key={index}
-          image={image}
-          index={index}
-          loading={imageLoading[index]}
-          zoom={zoom}
-          x={x}
-          y={y}
-          onTileClick={onTileClick}
-        />
-      ))}
-    </div>
+    <>
+      {cells.map((cell, index) => {
+        const pos = parseCellLocation(cell.location);
+        if (!pos) return null;
+        return (
+          <Marker
+            key={`${cell.creator ?? ''}-${cell.name}-${index}`}
+            position={[pos.lat, pos.lng]}
+            icon={icon}
+          >
+            <Popup>
+              <strong>{cell.name}</strong>
+              {cell.creator && (
+                <>
+                  <br />
+                  {cell.creator}
+                </>
+              )}
+            </Popup>
+          </Marker>
+        );
+      })}
+    </>
   );
-};
+}
 
 // SearchResultItem component
 const SearchResultItem = ({ result, onLinkClick }: SearchResultItemProps) => {
   return (
-    <div style={{
-      marginBottom: '3px',
-      paddingBottom: '3px',
-      borderBottom: '1px solid #eee',
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'center'
-    }}>
-      <div style={{ flex: 1 }}>
-        {result.name}
-      </div>
+    <div
+      style={{
+        marginBottom: '3px',
+        paddingBottom: '3px',
+        borderBottom: '1px solid #eee',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+      }}
+    >
+      <div style={{ flex: 1 }}>{result.name}</div>
       <div style={{ flex: 1, textAlign: 'right' }}>
         {result.link ? (
           <button
@@ -194,14 +213,18 @@ const SearchResultItem = ({ result, onLinkClick }: SearchResultItemProps) => {
               cursor: 'pointer',
               fontSize: '11px',
               textDecoration: 'none',
-              display: 'inline-block'
+              display: 'inline-block',
             }}
             title={`Go to location: ${result.link}`}
           >
             {result.link}
           </button>
         ) : (
-          <span style={{ color: '#999', fontStyle: 'italic', fontSize: '11px' }}>No link</span>
+          <span
+            style={{ color: '#999', fontStyle: 'italic', fontSize: '11px' }}
+          >
+            No link
+          </span>
         )}
       </div>
     </div>
@@ -209,24 +232,31 @@ const SearchResultItem = ({ result, onLinkClick }: SearchResultItemProps) => {
 };
 
 // SearchResultsList component
-const SearchResultsList = ({ searchResults, onLinkClick }: SearchResultsListProps) => {
+const SearchResultsList = ({
+  searchResults,
+  onLinkClick,
+}: SearchResultsListProps) => {
   if (searchResults.length === 0) return null;
 
   return (
-    <div style={{
-      marginTop: '10px',
-      padding: '10px',
-      backgroundColor: 'white',
-      color: '#333',
-      border: '1px solid #ddd',
-      borderRadius: '4px',
-      fontSize: '14px'
-    }}>
-      <div style={{
-        maxHeight: '150px',
-        overflowY: 'auto',
-        padding: '5px'
-      }}>
+    <div
+      style={{
+        marginTop: '10px',
+        padding: '10px',
+        backgroundColor: 'white',
+        color: '#333',
+        border: '1px solid #ddd',
+        borderRadius: '4px',
+        fontSize: '14px',
+      }}
+    >
+      <div
+        style={{
+          maxHeight: '150px',
+          overflowY: 'auto',
+          padding: '5px',
+        }}
+      >
         {searchResults.map((result, index) => (
           <SearchResultItem
             key={index}
@@ -258,13 +288,9 @@ function App() {
   const [x, setX] = useState(0);
   const [y, setY] = useState(0);
   const [zoom, setZoom] = useState(1);
-  const [images, setImages] = useState<Array<string | null>>(Array(4).fill(null));
+  const mapRef = useRef<L.Map | null>(null);
   const [identifiers, setIdentifiers] = useState<IdentifierMapping[]>([]);
-  const [identifiersFetched, setIdentifiersFetched] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [imageLoading, setImageLoading] = useState<boolean[]>(Array(4).fill(false));
-  // Fixed: Changed the type to HTMLDivElement | null to match useRef's return type
-  const gridContainerRef = useRef<HTMLDivElement | null>(null);
 
   // States for the Search form
   const [searchQueryTerm, setSearchQueryTerm] = useState('');
@@ -280,16 +306,15 @@ function App() {
   const [builtObject, setBuiltObject] = useState<any>(null);
 
   // New state for neighborhood images
-  const [neighborhoodImages, setNeighborhoodImages] = useState<Array<string | null>>(Array(4).fill(null));
-  const [neighborhoodImageLoading, setNeighborhoodImageLoading] = useState<boolean[]>(Array(4).fill(false));
-
   // States for the Set Neighborhood wizard
   const [hoodIndexError, setHoodIndexError] = useState('');
-  const [isGeneratingHoodIdentifier, setIsGeneratingHoodIdentifier] = useState(false);
+  const [isGeneratingHoodIdentifier, setIsGeneratingHoodIdentifier] =
+    useState(false);
   const [hoodBuiltObject, setHoodBuiltObject] = useState<any>(null);
 
   // New state for the Set Neighborhood popup modal
-  const [showSetNeighborhoodModal, setShowSetNeighborhoodModal] = useState(false);
+  const [showSetNeighborhoodModal, setShowSetNeighborhoodModal] =
+    useState(false);
 
   // States for the Start Freedom Cell wizard
   const [freedomCellName, setFreedomCellName] = useState('');
@@ -303,17 +328,18 @@ function App() {
   // New state for the confirmation modal
   const [showConfirmationModal, setShowConfirmationModal] = useState(false);
   const [pendingFreedomCellName, setPendingFreedomCellName] = useState('');
-  const [pendingFreedomCellIdentifier, setPendingFreedomCellIdentifier] = useState('');
-  const [pendingFreedomCellObject, setPendingFreedomCellObject] = useState<any>(null);
+  const [pendingFreedomCellIdentifier, setPendingFreedomCellIdentifier] =
+    useState('');
+  const [pendingFreedomCellObject, setPendingFreedomCellObject] =
+    useState<any>(null);
 
   // New state for the user's neighborhood data
-  const [userNeighborhood, setUserNeighborhood] = useState<NeighborhoodData | null>(null);
+  const [userNeighborhood, setUserNeighborhood] =
+    useState<NeighborhoodData | null>(null);
   const [neighborhoodLoading, setNeighborhoodLoading] = useState(false);
   const [neighborhoodError, setNeighborhoodError] = useState('');
 
   // New state to track if navigation is in progress
-  const [isNavigating, setIsNavigating] = useState(false);
-
   // New state for controlling the search panel visibility
   const [showSearchPanel, setShowSearchPanel] = useState(false);
 
@@ -334,15 +360,27 @@ function App() {
   }
 
   // Add these new state declarations to your App component:
-  const [freedomCellType, setFreedomCellType] = useState<GroupType>(GroupType.OPEN);
+  const [freedomCellType, setFreedomCellType] = useState<GroupType>(
+    GroupType.OPEN
+  );
   const [freedomCellError, setFreedomCellError] = useState('');
   const [freedomCellSuccess, setFreedomCellSuccess] = useState('');
 
   const [freedomCellsData, setFreedomCellsData] = useState<any[]>([]);
   const [freedomCellsLoading, setFreedomCellsLoading] = useState(false);
   const [freedomCellsError, setFreedomCellsError] = useState('');
+  const [mapBounds, setMapBounds] = useState<L.LatLngBounds | null>(null);
+  const [exportMissingOpen, setExportMissingOpen] = useState(false);
+  const [exportMissingLoading, setExportMissingLoading] = useState(false);
+  const [exportMissingData, setExportMissingData] = useState<
+    [number, [number, number][]][] | null
+  >(null);
+  const [exportMissingDepth, setExportMissingDepth] = useState(0);
 
-  const [isCheckingForGroupTransaction, setIsCheckingForGroupTransaction] = useState(false);
+  console.log('identifiers', identifiers);
+
+  const [isCheckingForGroupTransaction, setIsCheckingForGroupTransaction] =
+    useState(false);
 
   const [showErrorPanel, setShowErrorPanel] = useState(false);
   const [showSuccessPanel, setShowSuccessPanel] = useState(false);
@@ -351,15 +389,15 @@ function App() {
   const [modalState, setModalState] = useState({
     isOpen: false,
     type: 'error', // 'error' or 'success'
-    message: ''
+    message: '',
   });
 
-// Add these functions to handle the modal
+  // Add these functions to handle the modal
   const showErrorModal = (message: string) => {
     setModalState({
       isOpen: true,
       type: 'error',
-      message
+      message,
     });
   };
 
@@ -367,19 +405,15 @@ function App() {
     setModalState({
       isOpen: true,
       type: 'success',
-      message
+      message,
     });
   };
 
   const closeModal = () => {
     setModalState({
       ...modalState,
-      isOpen: false
+      isOpen: false,
     });
-  };
-
-  const onTileClick = (_: React.MouseEvent<HTMLDivElement>, identifier: string) => {
-    console.log('Tile clicked:', identifier);
   };
 
   // Replace the existing function with this updated version
@@ -393,8 +427,8 @@ function App() {
     try {
       // First, get the Cartographer name data to retrieve the address
       const nameDataResponse = await qortalRequest({
-        action: "GET_NAME_DATA",
-        name: "Cartographer",
+        action: 'GET_NAME_DATA',
+        name: 'Cartographer',
       });
 
       if (!nameDataResponse || !nameDataResponse.owner) {
@@ -405,11 +439,11 @@ function App() {
 
       // Get the account names for this address
       const accountNamesResponse = await qortalRequest({
-        action: "GET_ACCOUNT_NAMES",
+        action: 'GET_ACCOUNT_NAMES',
         address: address,
         limit: 0,
         offset: 0,
-        reverse: false
+        reverse: false,
       });
 
       if (!Array.isArray(accountNamesResponse)) {
@@ -418,15 +452,17 @@ function App() {
 
       // Extract the names from the response
       const names = accountNamesResponse.map((item: any) => item.name);
-      
+
       // Only update state if the names have actually changed to prevent unnecessary re-renders
-      setAddressNames(prev => {
+      setAddressNames((prev) => {
         if (JSON.stringify(prev) === JSON.stringify(names)) return prev;
         return names;
       });
     } catch (error) {
       console.error('Error fetching Cartographer address and names:', error);
-      setAddressNamesError(`Failed to fetch address names: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setAddressNamesError(
+        `Failed to fetch address names: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     } finally {
       setAddressNamesLoading(false);
     }
@@ -441,27 +477,35 @@ function App() {
     try {
       if (isChecked) {
         // Only add names that are NOT already in followedNames
-        const namesToAdd = currentAddressNames.filter(name => !followedNames.includes(name));
+        const namesToAdd = currentAddressNames.filter(
+          (name) => !followedNames.includes(name)
+        );
         if (namesToAdd.length === 0) return;
 
         await qortalRequest({
-          action: "ADD_LIST_ITEMS",
-          list_name: "followedNames",
-          items: namesToAdd
+          action: 'ADD_LIST_ITEMS',
+          list_name: 'followedNames',
+          items: namesToAdd,
         });
         // Update state with all unique names
-        setFollowedNames(prev => Array.from(new Set([...prev, ...namesToAdd])));
+        setFollowedNames((prev) =>
+          Array.from(new Set([...prev, ...namesToAdd]))
+        );
       } else {
         // Only remove names that ARE in followedNames
-        const namesToRemove = currentAddressNames.filter(name => followedNames.includes(name));
+        const namesToRemove = currentAddressNames.filter((name) =>
+          followedNames.includes(name)
+        );
         if (namesToRemove.length === 0) return;
 
         await qortalRequest({
-          action: "DELETE_LIST_ITEM",
-          list_name: "followedNames",
-          items: namesToRemove
+          action: 'DELETE_LIST_ITEM',
+          list_name: 'followedNames',
+          items: namesToRemove,
         });
-        setFollowedNames(prev => prev.filter(n => !namesToRemove.includes(n)));
+        setFollowedNames((prev) =>
+          prev.filter((n) => !namesToRemove.includes(n))
+        );
       }
     } catch (error) {
       console.error('Error updating followed names list:', error);
@@ -473,19 +517,19 @@ function App() {
       if (isChecked) {
         // Add the name to the followed names list
         await qortalRequest({
-          action: "ADD_LIST_ITEMS",
-          list_name: "followedNames",
-          items: [name]
+          action: 'ADD_LIST_ITEMS',
+          list_name: 'followedNames',
+          items: [name],
         });
         setFollowedNames([...followedNames, name]);
       } else {
         // Remove the name from the followed names list
         await qortalRequest({
-          action: "DELETE_LIST_ITEM",
-          list_name: "followedNames",
-          items: [name]
+          action: 'DELETE_LIST_ITEM',
+          list_name: 'followedNames',
+          items: [name],
         });
-        setFollowedNames(followedNames.filter(n => n !== name));
+        setFollowedNames(followedNames.filter((n) => n !== name));
       }
     } catch (error) {
       console.error('Error updating followed names list:', error);
@@ -509,10 +553,14 @@ function App() {
 
     try {
       // First, discover if the user has a neighborhood
-      const searchResponse = await fetch(`/arbitrary/resources/searchsimple?service=JSON&identifier=idx-hood&name=${userName}&limit=1`);
+      const searchResponse = await fetch(
+        `/arbitrary/resources/searchsimple?service=JSON&identifier=idx-hood&name=${userName}&limit=1`
+      );
 
       if (!searchResponse.ok) {
-        throw new Error(`Network response was not ok: ${searchResponse.status}`);
+        throw new Error(
+          `Network response was not ok: ${searchResponse.status}`
+        );
       }
 
       const searchData = await searchResponse.json();
@@ -526,10 +574,14 @@ function App() {
         console.log('Neighborhood exists, timestamp:', timestamp);
 
         // Now fetch the actual neighborhood data
-        const dataResponse = await fetch(`/arbitrary/JSON/${userName}/idx-hood`);
+        const dataResponse = await fetch(
+          `/arbitrary/JSON/${userName}/idx-hood`
+        );
 
         if (!dataResponse.ok) {
-          throw new Error(`Network response was not ok: ${dataResponse.status}`);
+          throw new Error(
+            `Network response was not ok: ${dataResponse.status}`
+          );
         }
 
         const data = await dataResponse.json();
@@ -546,16 +598,11 @@ function App() {
             n: rawData.n,
             c: rawData.c,
             l: rawData.l,
-            timestamp: timestamp // Add timestamp to the neighborhood data
+            timestamp: timestamp, // Add timestamp to the neighborhood data
           };
 
           console.log('Mapped neighborhood data:', neighborhoodData);
           setUserNeighborhood(neighborhoodData);
-
-          // Fetch the images for this neighborhood location
-          if (neighborhoodData.l) {
-            fetchNeighborhoodImages(neighborhoodData.l);
-          }
         } else {
           console.log('No neighborhood data in response');
           setUserNeighborhood(null);
@@ -576,16 +623,21 @@ function App() {
   };
 
   // Function to fetch and process Freedom Cell data
+
   const fetchFreedomCellsData = async () => {
     setFreedomCellsLoading(true);
     setFreedomCellsError('');
 
     try {
       // First call to get all idx-cell resources
-      const resourcesResponse = await fetch('/arbitrary/resources/searchsimple?service=JSON&identifier=idx-cell&limit=0');
+      const resourcesResponse = await fetch(
+        '/arbitrary/resources/searchsimple?service=JSON&identifier=idx-cell&limit=0'
+      );
 
       if (!resourcesResponse.ok) {
-        throw new Error(`Failed to fetch resources: ${resourcesResponse.status}`);
+        throw new Error(
+          `Failed to fetch resources: ${resourcesResponse.status}`
+        );
       }
 
       const resourcesData = await resourcesResponse.json();
@@ -594,23 +646,37 @@ function App() {
       const freedomCellsPromises = resourcesData.map(async (resource: any) => {
         try {
           // Get idx-cell data
-          const cellResponse = await fetch(`/arbitrary/indices/${resource.name}/idx-cell`);
+          const cellResponse = await fetch(
+            `/arbitrary/${resource.service}/${resource.name}/idx-cell`
+          );
 
           // Get idx-hood data
-          const hoodResponse = await fetch(`/arbitrary/indices/${resource.name}/idx-hood`);
+          const hoodResponse = await fetch(
+            `/arbitrary/${resource.service}/${resource.name}/idx-hood`
+          );
 
           // If either response is empty, discard this resource
           if (!cellResponse.ok || !hoodResponse.ok) {
-            console.log(`Skipping ${resource.name}: idx-cell or idx-hood data not available`);
+            console.log(
+              `Skipping ${resource.name}: idx-cell or idx-hood data not available`
+            );
             return null;
           }
 
           const cellData = await cellResponse.json();
           const hoodData = await hoodResponse.json();
+          console.log('Cell data:', cellData);
+          console.log('Hood data:', hoodData);
 
-          if (!Array.isArray(cellData) || cellData.length === 0 ||
-            !Array.isArray(hoodData) || hoodData.length === 0) {
-            console.log(`Skipping ${resource.name}: idx-cell or idx-hood array is empty`);
+          if (
+            !Array.isArray(cellData) ||
+            cellData.length === 0 ||
+            !Array.isArray(hoodData) ||
+            hoodData.length === 0
+          ) {
+            console.log(
+              `Skipping ${resource.name}: idx-cell or idx-hood array is empty`
+            );
             return null;
           }
 
@@ -626,7 +692,7 @@ function App() {
           }
 
           const nameData = await nameResponse.json();
-
+          console.log('nameData', nameData);
           // Get groups data
           const groupsResponse = await fetch(`/groups/owner/${nameData.owner}`);
 
@@ -638,26 +704,30 @@ function App() {
           const groupsData = await groupsResponse.json();
 
           // Find the group that matches the cell's link (groupId)
-          const matchingGroup = groupsData.find((group: any) =>
-            group.groupId.toString() === cellInfo.link
+          const matchingGroup = groupsData.find(
+            (group: any) => group.groupId.toString() === cellInfo?.l?.toString()
           );
 
           if (!matchingGroup) {
-            console.log(`Skipping ${resource.name}: no matching group found for groupId ${cellInfo.link}`);
+            console.log(
+              `Skipping ${resource.name}: no matching group found for groupId ${cellInfo.l}`
+            );
             return null;
           }
 
           // Format the location from the hood data
-          const location = hoodInfo.link;
+          const location = hoodInfo.l;
 
           // Return the formatted data
           return {
-            name: cellInfo.name,
+            name: cellInfo.n,
             location: location,
             description: matchingGroup.description || '',
             creator: resource.name,
-            timeCreated: new Date(resource.updated || resource.created).toLocaleString(), // Use updated if available
-            groupId: matchingGroup.groupId
+            timeCreated: new Date(
+              resource.updated || resource.created
+            ).toLocaleString(), // Use updated if available
+            groupId: matchingGroup.groupId,
           };
         } catch (error) {
           console.error(`Error processing ${resource.name}:`, error);
@@ -667,147 +737,25 @@ function App() {
 
       const results = await Promise.all(freedomCellsPromises);
       // Filter out null results
-      const validFreedomCells = results.filter(cell => cell !== null);
+      const validFreedomCells = results.filter((cell) => cell !== null);
 
       console.log('Valid Freedom Cells:', validFreedomCells);
       setFreedomCellsData(validFreedomCells);
     } catch (error) {
       console.error('Error fetching Freedom Cells data:', error);
-      setFreedomCellsError(`Failed to fetch Freedom Cells data: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setFreedomCellsError(
+        `Failed to fetch Freedom Cells data: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     } finally {
       setFreedomCellsLoading(false);
     }
   };
-
-  // Function to fetch images for the neighborhood location
-  const fetchNeighborhoodImages = async (locationString: string) => {
-    if (!locationString) {
-      console.log('No location string provided for neighborhood images');
-      return;
-    }
-
-    if (identifiers.length === 0) {
-      console.log(
-        'Identifiers not loaded yet, cannot fetch neighborhood images'
-      );
-      return;
-    }
-
-    console.log('Fetching neighborhood images for location:', locationString);
-
-    // Parse the location string (format: "zoom-x-y")
-    const parts = locationString.split('-');
-
-    if (parts.length !== 3) {
-      console.error('Invalid location format for neighborhood images');
-      return;
-    }
-
-    const hoodZoom = parseInt(parts[0]);
-    const hoodX = parseInt(parts[1]);
-    const hoodY = parseInt(parts[2]);
-
-    if (isNaN(hoodZoom) || isNaN(hoodX) || isNaN(hoodY)) {
-      console.error('Invalid coordinates in neighborhood location');
-      return;
-    }
-
-    // Reset loading states for all neighborhood images
-    setNeighborhoodImageLoading(Array(4).fill(true));
-
-    // Build the identifiers for the neighborhood location
-    const neighborhoodImageIdentifiers = [
-      `${hoodZoom}-${hoodX}-${hoodY}`,
-      `${hoodZoom}-${hoodX + 1}-${hoodY}`,
-      `${hoodZoom}-${hoodX}-${hoodY + 1}`,
-      `${hoodZoom}-${hoodX + 1}-${hoodY + 1}`,
-    ];
-
-    console.log(
-      'Neighborhood image identifiers to fetch:',
-      neighborhoodImageIdentifiers
-    );
-
-    // Create a modified fetchImage function that uses the neighborhood coordinates
-    const fetchNeighborhoodImage = async (identifier: string) => {
-      // Find the identifier mapping to get the correct name
-      const identifierMapping = identifiers.find(
-        (item) => item.identifier === identifier
-      );
-
-      console.log(
-        `Fetching image for identifier: ${identifier}, found mapping:`,
-        identifierMapping
-      );
-
-      if (identifierMapping) {
-        try {
-          const image64 = await qortalRequest({
-            action: 'FETCH_QDN_RESOURCE',
-            identifier,
-            encoding: 'base64',
-            name: identifierMapping.name, // Use the mapped name
-            service: 'IMAGE',
-            rebuild: false,
-          });
-
-          console.log(`Successfully fetched image for ${identifier}`);
-
-          // Check if image64 is already a complete data URI
-          if (image64.startsWith('data:image/')) {
-            return image64; // Return as-is
-          } else {
-            // Handle potential Base64 encoding issues by using a try-catch block
-            try {
-              // Check if the string is valid Base64 by attempting to decode it
-              window.atob(image64);
-              return `data:image/png;base64,${image64}`;
-            } catch (e) {
-              console.error('Invalid Base64 string:', e);
-              // Return an error message instead of trying to use the invalid Base64
-              return `Error\nInvalid\nBase64\n${identifier}`;
-            }
-          }
-        } catch (error) {
-          console.error('Error fetching the neighborhood image:', error);
-          return `Error\nLoading\n${identifier}\n(${identifierMapping.name})`;
-        }
-      } else {
-        console.log(`No mapping found for identifier: ${identifier}`);
-        return `Missing\nIdentifier\n${identifier}`;
-      }
-    };
-
-    const imagePromises = neighborhoodImageIdentifiers.map((id) =>
-      fetchNeighborhoodImage(id)
-    );
-
-    try {
-      const newImages = await Promise.all(imagePromises);
-      console.log('Neighborhood images fetched successfully:', newImages);
-      
-      // Check if any of the fetched neighborhood images contain an error string
-      const errorStrings = newImages.filter(img => typeof img === 'string' && (img.startsWith('Error') || img.startsWith('Missing'))) as string[];
-      
-      if (errorStrings.length > 0) {
-        const consolidatedError = consolidateErrors(errorStrings);
-        
-        // Fill all 4 tiles with the consolidated error, but ImageGrid will only show it once
-        setNeighborhoodImages(Array(4).fill(consolidatedError));
-      } else {
-        setNeighborhoodImages(newImages);
-      }
-    } catch (error) {
-      console.error('Error fetching neighborhood images:', error);
-      setNeighborhoodImages(Array(4).fill(`Error\nFetching\nNeighborhood\nImages`));
-    } finally {
-      setNeighborhoodImageLoading(Array(4).fill(false));
-    }
-  };
-
   // Discover user neighborhood on component mount and when auth name changes
   useEffect(() => {
-    console.log('useEffect triggered for neighborhood discovery, auth name:', auth?.name);
+    console.log(
+      'useEffect triggered for neighborhood discovery, auth name:',
+      auth?.name
+    );
     if (auth?.name) {
       discoverUserNeighborhood();
     }
@@ -823,7 +771,7 @@ function App() {
         }
 
         const freedomCellResponse = await fetch(
-          `/arbitrary/indices/${auth.name}/idx-cell`
+          `/arbitrary/JSON/${auth.name}/idx-cell`
         );
 
         if (freedomCellResponse.ok) {
@@ -851,99 +799,18 @@ function App() {
     fetchFreedomCellsData();
   }, []);
 
-  // Fetch neighborhood images when both userNeighborhood and identifiers are available
-  useEffect(() => {
-    console.log('Neighborhood useEffect triggered:', {
-      hasNeighborhood: !!userNeighborhood,
-      hasLocation: !!(userNeighborhood && userNeighborhood.l),
-      identifiersCount: identifiers.length
-    });
-
-    if (userNeighborhood && userNeighborhood.l && identifiers.length > 0) {
-      console.log('All conditions met, fetching neighborhood images');
-      fetchNeighborhoodImages(userNeighborhood.l);
-    }
-  }, [userNeighborhood, identifiers]);
-
   // Function to navigate to the user's neighborhood
   const navigateToNeighborhood = () => {
-    console.log('navigateToNeighborhood called, userNeighborhood:', userNeighborhood);
-
     if (userNeighborhood && userNeighborhood.l) {
-      console.log('Neighborhood location string:', userNeighborhood.l);
-
-      // Parse the location string (format: "zoom-x-y")
-      const parts = userNeighborhood.l.split('-');
-      console.log('Location parts:', parts);
-
-      if (parts.length === 3) {
-        const newZoom = parseInt(parts[0]);
-        const newX = parseInt(parts[1]);
-        const newY = parseInt(parts[2]);
-
-        console.log('Parsed coordinates:', { newZoom, newX, newY });
-
-        // Validate the parsed values
-        if (!isNaN(newZoom) && !isNaN(newX) && !isNaN(newY)) {
-          console.log('Coordinates are valid, setting new location');
-
-          // Set navigation in progress
-          setIsNavigating(true);
-
-          // Set the new coordinates and zoom level
-          setZoom(newZoom);
-          setX(newX);
-          setY(newY);
-
-          console.log('Set new coordinates, current state:', { zoom: newZoom, x: newX, y: newY });
-
-          // Create a new fetchImages function that uses the new coordinates directly
-          const fetchImagesForNewLocation = async () => {
-            // Reset loading states for all images
-            setImageLoading(Array(4).fill(true));
-
-            const imagePromises = [
-              fetchImage(`${newZoom}-${newX}-${newY}`),
-              fetchImage(`${newZoom}-${newX + 1}-${newY}`),
-              fetchImage(`${newZoom}-${newX}-${newY + 1}`),
-              fetchImage(`${newZoom}-${newX + 1}-${newY + 1}`)
-            ];
-
-            try {
-              const newImages = await Promise.all(imagePromises);
-              
-              // Check if any of the fetched images contain an error string
-              const errorStrings = newImages.filter(img => typeof img === 'string' && (img.startsWith('Error') || img.startsWith('Missing'))) as string[];
-              
-              if (errorStrings.length > 0) {
-                const consolidatedError = consolidateErrors(errorStrings);
-                
-                // Fill all 4 tiles with the consolidated error, but ImageGrid will only show it once
-                setImages(Array(4).fill(consolidatedError));
-              } else {
-                setImages(newImages);
-              }
-            } catch (error) {
-              console.error('Error fetching images:', error);
-              setImages(Array(4).fill(`Error\nFetching\nImages`));
-            } finally {
-              setImageLoading(Array(4).fill(false));
-              setIsNavigating(false);
-            }
-          };
-
-          // Call the new function immediately
-          fetchImagesForNewLocation();
-        } else {
-          console.error('Invalid coordinates in neighborhood data');
-          alert('Invalid coordinates in neighborhood data');
-        }
+      const parsed = parseLocationString(userNeighborhood.l);
+      if (parsed) {
+        mapRef.current?.setView([parsed.lat, parsed.lng], parsed.zoom, {
+          animate: false,
+        });
       } else {
-        console.error('Invalid location format in neighborhood data');
-        alert('Invalid location format in neighborhood data');
+        alert('Invalid coordinates in neighborhood data');
       }
     } else {
-      console.log('No neighborhood data available for navigation');
       alert('No neighborhood data available for navigation');
     }
   };
@@ -967,7 +834,9 @@ function App() {
       console.log('Searching for term:', queryTerm);
 
       // Fetch data from the indices endpoint
-      const response = await fetch(`/arbitrary/indices?terms=${encodeURIComponent(queryTerm)}`);
+      const response = await fetch(
+        `/arbitrary/indices?terms=${encodeURIComponent(queryTerm)}`
+      );
 
       if (!response.ok) {
         throw new Error(`Network response was not ok: ${response.status}`);
@@ -978,7 +847,7 @@ function App() {
 
       // Filter results by category = 9
       const filteredResults = Array.isArray(data)
-        ? data.filter(result => result.category === 9)
+        ? data.filter((result) => result.category === 9)
         : [];
 
       console.log('Filtered results (category = 9):', filteredResults);
@@ -995,10 +864,11 @@ function App() {
 
       // Set the filtered and sorted search results
       setSearchResults(sortedResults);
-
     } catch (error) {
       console.error('Error searching indices:', error);
-      setSearchQueryError(`Failed to search: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setSearchQueryError(
+        `Failed to search: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
       setSearchResults([]);
     } finally {
       setIsSearching(false);
@@ -1051,9 +921,9 @@ function App() {
         return;
       }
 
-      if (newZoom < 0 || newZoom > 20) {
+      if (newZoom < 1 || newZoom > 20) {
         console.error('Invalid zoom level in link:', newZoom);
-        alert(`Invalid zoom level: ${newZoom}. Must be between 0 and 20`);
+        alert(`Invalid zoom level: ${newZoom}. Must be between 1 and 20`);
         return;
       }
 
@@ -1064,17 +934,21 @@ function App() {
       }
 
       if (newX >= 2 ** newZoom || newY >= 2 ** newZoom) {
-        console.error('Coordinates out of bounds for zoom level:', { newX, newY, newZoom });
+        console.error('Coordinates out of bounds for zoom level:', {
+          newX,
+          newY,
+          newZoom,
+        });
         alert(`Coordinates out of bounds for zoom level ${newZoom}`);
         return;
       }
 
       // Update the state with new values
-      console.log('Navigating to:', { zoom: newZoom, x: newX, y: newY });
       setZoom(newZoom);
       setX(newX);
       setY(newY);
-
+      const center = tileToLatLng(newZoom, newX + 0.5, newY + 0.5);
+      mapRef.current?.setView(center, newZoom, { animate: false });
     } catch (error) {
       console.error('Error processing link:', error);
       alert('Error processing link coordinates');
@@ -1085,7 +959,6 @@ function App() {
     // If no names are selected, don't fetch
     if (names.length === 0) {
       setIdentifiers([]);
-      setIdentifiersFetched(true);
       setLoading(false);
       return;
     }
@@ -1098,7 +971,7 @@ function App() {
       urlParams.append('limit', '0');
 
       // Add each name as a separate parameter
-      names.forEach(name => {
+      names.forEach((name) => {
         urlParams.append('name', name);
       });
 
@@ -1108,18 +981,17 @@ function App() {
       if (!response.ok) {
         throw new Error('Network response was not ok');
       }
-      const data: { identifier: string; name: string }[] = await response.json();
+      const data: { identifier: string; name: string }[] =
+        await response.json();
       // Store both identifier and name mapping
       const identifierMappings: IdentifierMapping[] = data.map((item) => ({
         identifier: item.identifier,
-        name: item.name
+        name: item.name,
       }));
       setIdentifiers(identifierMappings);
-      setIdentifiersFetched(true);
     } catch (error) {
       console.error('Error fetching the data:', error);
       setIdentifiers([]);
-      setIdentifiersFetched(true);
     } finally {
       setLoading(false);
     }
@@ -1139,8 +1011,8 @@ function App() {
     // Get the followed names list
     try {
       const followedNamesResponse = await qortalRequest({
-        action: "GET_LIST_ITEMS",
-        list_name: "followedNames",
+        action: 'GET_LIST_ITEMS',
+        list_name: 'followedNames',
       });
 
       if (Array.isArray(followedNamesResponse)) {
@@ -1151,7 +1023,7 @@ function App() {
         });
       }
     } catch (followedNamesError) {
-      console.error("Error fetching followed names:", followedNamesError);
+      console.error('Error fetching followed names:', followedNamesError);
       // Don't fail the entire operation if followed names can't be fetched
     }
   }, []);
@@ -1162,25 +1034,20 @@ function App() {
     }
   }, [auth?.address, fetchFollowedNames]);
 
-  const handleUpdateCoordinates = (
-    newX: React.SetStateAction<number>,
-    newY: React.SetStateAction<number>
-  ) => {
-    setX(newX);
-    setY(newY);
+  const handlePan = (dx: number, dy: number) => {
+    const tileSize = 256;
+    mapRef.current?.panBy([dx * tileSize, dy * tileSize], { animate: true });
   };
 
   const handleZoomIn = () => {
-    if (zoom < 20 && x * 2 < 2 ** (zoom + 1) && y * 2 < 2 ** (zoom + 1)) {
-      setZoom((prevZoom) => prevZoom + 1);
-      handleUpdateCoordinates(x * 2 + 1, y * 2 + 1);
+    if (zoom < 20) {
+      mapRef.current?.zoomIn(1);
     }
   };
 
   const handleZoomOut = () => {
     if (zoom > 1) {
-      setZoom((prevZoom) => prevZoom - 1);
-      handleUpdateCoordinates(Math.floor(x / 2), Math.floor(y / 2));
+      mapRef.current?.zoomOut(1);
     }
   };
 
@@ -1193,145 +1060,111 @@ function App() {
       newX < 0 ||
       newX >= 2 ** currentZoom ||
       newY < 0 ||
-      newY >= 2 ** currentZoom ||
-      currentZoom <= 0 ||
-      currentZoom >= 20
+      newY >= 2 ** currentZoom
     );
   };
 
-  const consolidateErrors = (errors: string[]) => {
-    if (errors.length === 0) return '';
-    
-    const missingIdentifiers: string[] = [];
-    const errorLoading: string[] = [];
-    const invalidBase64: string[] = [];
-    const otherErrors: string[] = [];
-    
-    errors.forEach(err => {
-      if (err.startsWith('Missing\nIdentifier\n')) {
-        missingIdentifiers.push(err.replace('Missing\nIdentifier\n', ''));
-      } else if (err.startsWith('Error\nLoading\n')) {
-        errorLoading.push(err.replace('Error\nLoading\n', ''));
-      } else if (err.startsWith('Error\nInvalid\nBase64\n')) {
-        invalidBase64.push(err.replace('Error\nInvalid\nBase64\n', ''));
+  const fetchImage = useCallback(
+    async (identifier: string) => {
+      const identifierMapping = identifiers.find(
+        (item) => item.identifier === identifier
+      );
+
+      if (identifierMapping) {
+        try {
+          const image64 = await qortalRequest({
+            action: 'FETCH_QDN_RESOURCE',
+            identifier,
+            encoding: 'base64',
+            name: identifierMapping.name,
+            service: 'IMAGE',
+            rebuild: false,
+          });
+
+          if (image64.startsWith('data:image/')) {
+            return image64;
+          } else {
+            try {
+              window.atob(image64);
+              return `data:image/png;base64,${image64}`;
+            } catch (e) {
+              console.error('Invalid Base64 string:', e);
+              return `Error\nInvalid\nBase64\n${identifier}`;
+            }
+          }
+        } catch (error) {
+          console.error('Error fetching the image:', error);
+          return `Error\nLoading\n${identifier}\n(${identifierMapping.name})`;
+        }
       } else {
-        otherErrors.push(err);
+        return `Missing\nIdentifier\n${identifier}`;
       }
-    });
-    
-    const consolidated: string[] = [];
-    
-    if (missingIdentifiers.length > 0) {
-      if (missingIdentifiers.length === 1) {
-        consolidated.push(`Missing\nIdentifier\n${missingIdentifiers[0]}`);
-      } else {
-        consolidated.push(`Missing\nIdentifiers\n${missingIdentifiers.join('\n')}`);
-      }
-    }
+    },
+    [identifiers]
+  );
 
-    if (errorLoading.length > 0) {
-      if (errorLoading.length === 1) {
-        consolidated.push(`Error\nLoading\n${errorLoading[0]}`);
-      } else {
-        consolidated.push(`Errors\nLoading\n${errorLoading.join('\n')}`);
-      }
-    }
+  const fetchTileImage = useCallback(
+    (z: number, x: number, y: number) => fetchImage(`${z}-${x}-${y}`),
+    [fetchImage]
+  );
 
-    if (invalidBase64.length > 0) {
-      if (invalidBase64.length === 1) {
-        consolidated.push(`Error\nInvalid\nBase64\n${invalidBase64[0]}`);
-      } else {
-        consolidated.push(`Errors\nInvalid\nBase64\n${invalidBase64.join('\n')}`);
-      }
-    }
-    
-    if (otherErrors.length > 0) {
-      consolidated.push(...Array.from(new Set(otherErrors)));
-    }
-    
-    return consolidated.join('\n\n');
-  };
+  /** Zoom range for missing-tiles export (must match tile layer limits). */
+  const MISSING_TILES_MIN_ZOOM = 1;
+  const MISSING_TILES_MAX_ZOOM = 20;
+  const MISSING_TILES_MAX_DEPTH = 3;
 
-  const fetchImages = async () => {
-    // Reset loading states for all images
-    setImageLoading(Array(4).fill(true));
-
-    const imagePromises = [
-      fetchImage(`${zoom}-${x}-${y}`),
-      fetchImage(`${zoom}-${x + 1}-${y}`),
-      fetchImage(`${zoom}-${x}-${y + 1}`),
-      fetchImage(`${zoom}-${x + 1}-${y + 1}`)
-    ];
-
-    try {
-      const newImages = await Promise.all(imagePromises);
-      
-      // Check if any of the fetched images contain an error string
-      const errorStrings = newImages.filter(img => typeof img === 'string' && (img.startsWith('Error') || img.startsWith('Missing'))) as string[];
-      
-      if (errorStrings.length > 0) {
-        const consolidatedError = consolidateErrors(errorStrings);
-        
-        // Fill all 4 tiles with the consolidated error, but ImageGrid will only show it once
-        setImages(Array(4).fill(consolidatedError));
-      } else {
-        setImages(newImages);
-      }
-    } catch (error) {
-      console.error('Error fetching images:', error);
-      setImages(Array(4).fill(`Error\nFetching\nImages`));
-    } finally {
-      setImageLoading(Array(4).fill(false));
-    }
-  };
-
-  // This effect will trigger when identifiers change (due to name additions/removals) or coordinates change
-  useEffect(() => {
-    if (identifiersFetched && !isNavigating) {
-      fetchImages();
-    }
-  }, [identifiers, identifiersFetched, x, y, zoom, isNavigating]);
-
-  const fetchImage = async (identifier: string) => {
-    // Find the identifier mapping to get the correct name
-    const identifierMapping = identifiers.find(
-      (item) => item.identifier === identifier
-    );
-
-    if (identifierMapping) {
-      try {
-        const image64 = await qortalRequest({
-          action: 'FETCH_QDN_RESOURCE',
-          identifier,
-          encoding: 'base64',
-          name: identifierMapping.name, // Use the mapped name
-          service: 'IMAGE',
-          rebuild: false,
-        });
-
-        // Check if image64 is already a complete data URI
-        if (image64.startsWith('data:image/')) {
-          return image64; // Return as-is
-        } else {
-          // Handle potential Base64 encoding issues by using a try-catch block
-          try {
-            // Check if the string is valid Base64 by attempting to decode it
-            window.atob(image64);
-            return `data:image/png;base64,${image64}`;
-          } catch (e) {
-            console.error('Invalid Base64 string:', e);
-            // Return an error message instead of trying to use the invalid Base64
-            return `Error\nInvalid\nBase64\n${identifier}`;
+  /**
+   * Get missing tiles in current map bounds as 2-level array: [ [zoom, [[x,y], ...]], ... ].
+   * Includes current zoom plus `depth` levels deeper (0 = current only; zooms clamped to 1..20).
+   * "Missing" = tile id not published by any Cartographer name (from searchsimple; no image fetch).
+   */
+  const getMissingTilesInBounds = useCallback(
+    async (depth: number): Promise<[number, [number, number][]][]> => {
+      const map = mapRef.current;
+      const bounds = map?.getBounds() ?? mapBounds;
+      if (!bounds) return [];
+      const currentZoom = map
+        ? Math.round(map.getZoom())
+        : zoom;
+      const clampedDepth = Math.max(
+        0,
+        Math.min(MISSING_TILES_MAX_DEPTH, depth)
+      );
+      const publishedSet = new Set(identifiers.map((i) => i.identifier));
+      const result: [number, [number, number][]][] = [];
+      for (let d = 0; d <= clampedDepth; d++) {
+        const z = Math.min(
+          MISSING_TILES_MAX_ZOOM,
+          Math.max(MISSING_TILES_MIN_ZOOM, currentZoom + d)
+        );
+        const n = Math.pow(2, z);
+        const maxTile = Math.max(0, n - 1);
+        const nw = latLngToTile(z, bounds.getNorth(), bounds.getWest());
+        const se = latLngToTile(z, bounds.getSouth(), bounds.getEast());
+        const xMin = Math.max(0, Math.min(nw.x, se.x));
+        const xMax = Math.min(maxTile, Math.max(nw.x, se.x));
+        const yMin = Math.max(0, Math.min(nw.y, se.y));
+        const yMax = Math.min(maxTile, Math.max(nw.y, se.y));
+        const missing: [number, number][] = [];
+        for (let x = xMin; x <= xMax; x++) {
+          for (let y = yMin; y <= yMax; y++) {
+            const tileId = `${z}-${x}-${y}`;
+            if (!publishedSet.has(tileId)) missing.push([x, y]);
           }
         }
-      } catch (error) {
-        console.error('Error fetching the image:', error);
-        return `Error\nLoading\n${identifier}\n(${identifierMapping.name})`;
+        const lastZ = result.length > 0 ? result[result.length - 1][0] : null;
+        if (lastZ !== z) result.push([z, missing]);
+        if (z >= MISSING_TILES_MAX_ZOOM) break;
       }
-    } else {
-      return `Missing\nIdentifier\n${identifier}`;
-    }
-  };
+      return result;
+    },
+    [mapBounds, zoom, identifiers]
+  );
+
+  const handleExportMissingDialogClose = useCallback(() => {
+    setExportMissingOpen(false);
+    setExportMissingData(null);
+  }, []);
 
   // Handle Start Freedom Cell wizard submission - prepare for confirmation
   const handleFreedomCellSubmit = async (e: React.FormEvent) => {
@@ -1380,7 +1213,6 @@ function App() {
       // Close the Freedom Cell modal and show the confirmation modal
       setShowFreedomCellModal(false);
       setShowConfirmationModal(true);
-
     } catch (error) {
       console.error('Error preparing Freedom Cell:', error);
 
@@ -1392,11 +1224,12 @@ function App() {
         if (error.message) {
           // @ts-ignore
           errorMessage = error.message;
-        } else { // @ts-ignore
+        } else {
+          // @ts-ignore
           if (error.error) {
-                    // @ts-ignore
+            // @ts-ignore
             errorMessage = error.error;
-                  }
+          }
         }
       } else if (typeof error === 'string') {
         errorMessage = error;
@@ -1421,7 +1254,7 @@ function App() {
       // First, create the group
       console.log('Creating group with name:', pendingGroupName);
       const groupResponse = await qortalRequest({
-        action: "CREATE_GROUP",
+        action: 'CREATE_GROUP',
         groupName: pendingGroupName,
         description: pendingGroupDescription,
         type: freedomCellType,
@@ -1434,7 +1267,7 @@ function App() {
 
       // Get the user's address for the transaction search
       const account = await qortalRequest({
-        action: "GET_USER_ACCOUNT",
+        action: 'GET_USER_ACCOUNT',
       });
 
       console.log('User address for transaction search:', account);
@@ -1448,7 +1281,9 @@ function App() {
           );
 
           if (!searchResponse.ok) {
-            throw new Error(`Network response was not ok: ${searchResponse.status}`);
+            throw new Error(
+              `Network response was not ok: ${searchResponse.status}`
+            );
           }
 
           const transactionData = await searchResponse.json();
@@ -1459,18 +1294,27 @@ function App() {
 
             // Check if the transaction name matches our Freedom Cell name
             if (latestTransaction.groupName === pendingGroupName) {
-              console.log('Found matching transaction with groupId:', latestTransaction.groupId);
+              console.log(
+                'Found matching transaction with groupId:',
+                latestTransaction.groupId
+              );
 
               // Update the Freedom Cell object with the groupId
               const updatedFreedomCellObject = {
                 ...pendingFreedomCellObject,
-                l: latestTransaction.groupId // Use the groupId as the l value
+                l: latestTransaction.groupId, // Use the groupId as the l value
               };
 
-              console.log('Updated Freedom Cell object:', updatedFreedomCellObject);
+              console.log(
+                'Updated Freedom Cell object:',
+                updatedFreedomCellObject
+              );
 
               // Print to console for the Freedom Cell
-              console.log('Freedom Cell identifier:', pendingFreedomCellIdentifier);
+              console.log(
+                'Freedom Cell identifier:',
+                pendingFreedomCellIdentifier
+              );
               console.log('Freedom Cell object:', updatedFreedomCellObject);
 
               // Create a JSON array containing the updated Freedom Cell object
@@ -1489,10 +1333,10 @@ function App() {
 
               // Publish the Freedom Cell
               await qortalRequest({
-                action: "PUBLISH_QDN_RESOURCE",
-                service: "JSON",
-                identifier: "idx-cell",
-                base64: dataToBase
+                action: 'PUBLISH_QDN_RESOURCE',
+                service: 'JSON',
+                identifier: 'idx-cell',
+                base64: dataToBase,
               });
 
               // Set checking state to false
@@ -1502,18 +1346,30 @@ function App() {
               setShowConfirmationModal(false);
 
               // Show success message
-              setFreedomCellSuccess(`Freedom Cell "${pendingFreedomCellName}" created successfully!`);
+              setFreedomCellSuccess(
+                `Freedom Cell "${pendingFreedomCellName}" created successfully!`
+              );
               setShowSuccessPanel(true);
             } else {
-              console.log('Transaction name does not match:', latestTransaction.groupName, '!=', pendingGroupName);
+              console.log(
+                'Transaction name does not match:',
+                latestTransaction.groupName,
+                '!=',
+                pendingGroupName
+              );
 
               // If name doesn't match and we haven't exceeded retry limit, wait and retry
               if (retryCount < 100) {
                 console.log('Waiting 3 seconds to retry...');
-                setTimeout(() => checkForGroupTransaction(retryCount + 1), 3000);
+                setTimeout(
+                  () => checkForGroupTransaction(retryCount + 1),
+                  3000
+                );
               } else {
                 setIsCheckingForGroupTransaction(false);
-                throw new Error('Failed to find matching group transaction after multiple attempts');
+                throw new Error(
+                  'Failed to find matching group transaction after multiple attempts'
+                );
               }
             }
           } else {
@@ -1525,7 +1381,9 @@ function App() {
               setTimeout(() => checkForGroupTransaction(retryCount + 1), 3000);
             } else {
               setIsCheckingForGroupTransaction(false);
-              throw new Error('No group transactions found after multiple attempts');
+              throw new Error(
+                'No group transactions found after multiple attempts'
+              );
             }
           }
         } catch (error) {
@@ -1544,7 +1402,6 @@ function App() {
 
       // Start checking for the group transaction
       await checkForGroupTransaction();
-
     } catch (error) {
       console.error('Error creating group or Freedom Cell:', error);
 
@@ -1611,9 +1468,9 @@ function App() {
       // Print the lowercase term to console
       console.log('Index term submitted (lowercase):', lowerCaseTerm);
 
-      const entityType = "post" // Give a name to the type of data this is in your app. All posts will need to have the same entity type. do not give for example "comments" the entity type "post"
+      const entityType = 'post'; // Give a name to the type of data this is in your app. All posts will need to have the same entity type. do not give for example "comments" the entity type "post"
 
-      const parentId = null  // Since there is no parent to posts in our example, we will give it a value of null.
+      const parentId = null; // Since there is no parent to posts in our example, we will give it a value of null.
 
       // Await the Promise and get the identifier string
       const identifier = await buildIdentifier(entityType, parentId); // Will return a unique identifier
@@ -1628,14 +1485,16 @@ function App() {
       const upperLeftIdentifier = `${zoom}-${x}-${y}`;
 
       // Find the identifier mapping for the upper left tile to get its name
-      const upperLeftMapping = identifiers.find(item => item.identifier === upperLeftIdentifier);
+      const upperLeftMapping = identifiers.find(
+        (item) => item.identifier === upperLeftIdentifier
+      );
 
       // Build the object with the specified structure using lowercase term
       const newBuiltObject = {
         t: lowerCaseTerm, // the term in lowercase
         n: upperLeftMapping ? upperLeftMapping.name : 'Unknown', // the name from the upper left tile
         c: 9, // the category number
-        l: `${zoom}-${x}-${y}` // location coordinates separated by dash marks
+        l: `${zoom}-${x}-${y}`, // location coordinates separated by dash marks
       };
 
       setBuiltObject(newBuiltObject);
@@ -1644,7 +1503,10 @@ function App() {
       console.log('Index identifier:', prefixedIdentifier);
       console.log('Built object:', newBuiltObject);
       console.log('Upper left tile identifier:', upperLeftIdentifier);
-      console.log('Upper left tile name:', upperLeftMapping ? upperLeftMapping.name : 'Unknown');
+      console.log(
+        'Upper left tile name:',
+        upperLeftMapping ? upperLeftMapping.name : 'Unknown'
+      );
 
       // Create a JSON array containing the newBuiltObject
       const jsonArray = [newBuiltObject];
@@ -1661,12 +1523,11 @@ function App() {
       }
 
       await qortalRequest({
-        action: "PUBLISH_QDN_RESOURCE",
-        service: "JSON",
+        action: 'PUBLISH_QDN_RESOURCE',
+        service: 'JSON',
         identifier: prefixedIdentifier,
-        base64: dataToBase
+        base64: dataToBase,
       });
-
     } catch (error) {
       console.error('Error generating identifier:', error);
       setIndexError('Failed to generate identifier');
@@ -1715,12 +1576,18 @@ function App() {
         (item) => item.identifier === upperLeftIdentifier
       );
 
+      // Get the map center lat/lng and zoom from Leaflet
+      const mapCenter = mapRef.current?.getCenter();
+      const centerLat = mapCenter ? mapCenter.lat : 0;
+      const centerLng = mapCenter ? mapCenter.lng : 0;
+      const currentZoom = mapRef.current?.getZoom() ?? zoom;
+
       // Build the object with the specified structure
       const newHoodBuiltObject = {
         t: hoodTerm, // the term (user name + neighborhood)
         n: upperLeftMapping ? upperLeftMapping.name : 'Unknown', // the name from the upper left tile
         c: 901, // the category number (901 for neighborhoods)
-        l: `${zoom}-${x}-${y}`, // location coordinates separated by dash marks
+        l: `${currentZoom}-${centerLat}-${centerLng}`, // zoom, lat, lng separated by dashes
       };
 
       setHoodBuiltObject(newHoodBuiltObject);
@@ -1760,6 +1627,73 @@ function App() {
 
       // Refresh the user's neighborhood data
       discoverUserNeighborhood();
+
+      // Update freedomCellsData state: update this user's cell location, or add a new item with group description
+      const newLocation = `${currentZoom}-${centerLat}-${centerLng}`;
+      const existingCell = freedomCellsData.find(
+        (cell) => cell.creator === userName
+      );
+      if (existingCell) {
+        setFreedomCellsData((prev) =>
+          prev.map((cell) =>
+            cell.creator === userName
+              ? { ...cell, location: newLocation }
+              : cell
+          )
+        );
+      } else {
+        // Fetch group info for description (same as fetchFreedomCellsData)
+        let description = '';
+        let groupId: number | undefined;
+        let cellName = newHoodBuiltObject.n || `${userName}'s Cell`;
+        try {
+          const nameResponse = await fetch(`/names/${userName}`);
+          if (nameResponse.ok) {
+            const nameData = await nameResponse.json();
+            const cellResponse = await fetch(
+              `/arbitrary/JSON/${userName}/idx-cell`
+            );
+            if (cellResponse.ok) {
+              const cellData = await cellResponse.json();
+              const cellInfo =
+                Array.isArray(cellData) && cellData.length > 0
+                  ? cellData[0]
+                  : null;
+              if (cellInfo?.n) cellName = cellInfo.n;
+              const groupsResponse = await fetch(
+                `/groups/owner/${nameData.owner}`
+              );
+              if (groupsResponse.ok) {
+                const groupsData = await groupsResponse.json();
+                const matchingGroup =
+                  cellInfo?.l != null
+                    ? groupsData.find(
+                        (g: any) =>
+                          g.groupId?.toString() === cellInfo.l?.toString()
+                      )
+                    : null;
+                if (matchingGroup) {
+                  description = matchingGroup.description ?? '';
+                  groupId = matchingGroup.groupId;
+                }
+              }
+            }
+          }
+        } catch (_) {
+          // keep description '' and groupId undefined
+        }
+        setFreedomCellsData((prev) => [
+          ...prev,
+          {
+            name: cellName,
+            location: newLocation,
+            description,
+            creator: userName,
+            timeCreated: new Date().toLocaleString(),
+            ...(groupId !== undefined && { groupId }),
+          },
+        ]);
+      }
     } catch (error) {
       console.error('Error generating neighborhood identifier:', error);
       setHoodIndexError('Failed to generate neighborhood identifier');
@@ -1780,12 +1714,21 @@ function App() {
 
   const panelStyles = getPanelStyles();
 
+  // Freedom cells that fall within the current map bounds (when bounds available)
+  const cellsInBounds = useMemo(() => {
+    if (!mapBounds) return freedomCellsData;
+    return freedomCellsData.filter((cell) => {
+      const pos = parseCellLocation(cell.location);
+      return pos !== null && mapBounds.contains(pos);
+    });
+  }, [freedomCellsData, mapBounds]);
+
   // Debug effect to log neighborhood state changes
   useEffect(() => {
     console.log('Neighborhood state changed:', {
       userNeighborhood,
       neighborhoodLoading,
-      neighborhoodError
+      neighborhoodError,
     });
   }, [userNeighborhood, neighborhoodLoading, neighborhoodError]);
 
@@ -1831,19 +1774,25 @@ function App() {
             display: 'flex',
             justifyContent: 'center',
             alignItems: 'center',
-            backgroundColor: (addressNames.length > 0 && addressNames.every(name => followedNames.includes(name))) 
-              ? '#28a745' 
-              : '#dc3545',
+            backgroundColor:
+              addressNames.length > 0 &&
+              addressNames.every((name) => followedNames.includes(name))
+                ? '#28a745'
+                : '#dc3545',
             border: `1px solid ${theme === EnumTheme.DARK ? '#666' : '#ccc'}`,
             borderRadius: '4px',
-            cursor: 'pointer'
+            cursor: 'pointer',
           }}
         >
-      <span style={{
-        fontSize: '18px',
-        fontWeight: 'bold',
-        color: 'white'
-      }}>Map Image Hosting</span>
+          <span
+            style={{
+              fontSize: '18px',
+              fontWeight: 'bold',
+              color: 'white',
+            }}
+          >
+            Map Image Hosting
+          </span>
         </button>
       </div>
 
@@ -1853,8 +1802,8 @@ function App() {
           display: 'flex',
           justifyContent: 'space-between',
           width: '100%',
-          maxWidth: '1200px',  // Add this to constrain overall width
-          margin: '0 auto',  // Center the container
+          maxWidth: '1200px', // Add this to constrain overall width
+          margin: '0 auto', // Center the container
           marginBottom: '20px',
         }}
       >
@@ -1868,7 +1817,6 @@ function App() {
             height: '100%',
           }}
         >
-
           {/* User Neighborhood Panel */}
           <div
             style={{
@@ -1919,177 +1867,120 @@ function App() {
                 Error: {neighborhoodError}
               </div>
             ) : (
-              <div style={{ position: 'relative', height: '100%', display: 'flex', flexDirection: 'column' }}>
-                {/* Panel Header with Last Updated */}
-                <div style={{
+              <div
+                style={{
+                  position: 'relative',
+                  height: '100%',
                   display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  marginBottom: '10px'
-                }}>
-                  <div style={{ fontSize: '21px', fontWeight: 'bold', color: panelStyles.color }}>
+                  flexDirection: 'column',
+                }}
+              >
+                {/* Panel Header with Last Updated */}
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: '10px',
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: '21px',
+                      fontWeight: 'bold',
+                      color: panelStyles.color,
+                    }}
+                  >
                     Your Neighborhood
                   </div>
                   {userNeighborhood && userNeighborhood.timestamp && (
-                    <div style={{ fontSize: '10.5px', fontWeight: 'bold', color: panelStyles.color }}>
-                      Last Updated: {new Date(parseInt(userNeighborhood.timestamp)).toLocaleString()}
+                    <div
+                      style={{
+                        fontSize: '10.5px',
+                        fontWeight: 'bold',
+                        color: panelStyles.color,
+                      }}
+                    >
+                      Last Updated:{' '}
+                      {new Date(
+                        parseInt(userNeighborhood.timestamp)
+                      ).toLocaleString()}
                     </div>
                   )}
                 </div>
 
-                {/* Content area - either neighborhood images or centered message */}
-                <div style={{
-                  flex: 1,
-                  display: 'flex',
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                  position: 'relative'
-                }}>
-                  {userNeighborhood && userNeighborhood.t ? (
-                    <div style={{
-                      width: '256px',
-                      height: '256px',
-                      overflow: 'hidden',
-                      borderRadius: '4px',
-                      border: '1px solid var(--modal-border-color, #444)'
-                    }}>
-                      <div style={{
-                        display: 'grid',
-                        gridTemplateColumns: '1fr 1fr',
-                        gridTemplateRows: '1fr 1fr',
-                        width: '100%',
-                        height: '100%'
-                      }}>
-                        <div style={{ position: 'relative', overflow: 'hidden' }}>
-                          {neighborhoodImages[0] && (
-                            <img
-                              src={neighborhoodImages[0]}
-                              alt="Top Left"
-                              style={{
-                                width: '100%',
-                                height: '100%',
-                                objectFit: 'cover'
-                              }}
-                            />
-                          )}
-                          {neighborhoodImageLoading[0] && (
-                            <div style={{
+                {/* Content area - either neighborhood map or centered message */}
+                <div
+                  style={{
+                    flex: 1,
+                    display: 'flex',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    position: 'relative',
+                  }}
+                >
+                  {userNeighborhood &&
+                  userNeighborhood.t &&
+                  userNeighborhood.l ? (
+                    (() => {
+                      const parsed = parseLocationString(userNeighborhood.l);
+                      if (!parsed) return null;
+                      const hoodCenter: L.LatLngExpression = {
+                        lat: parsed.lat,
+                        lng: parsed.lng,
+                      };
+                      const hoodPreviewZoom = Math.max(1, parsed.zoom - 1);
+                      if (!hoodCenter) return null;
+                      return (
+                        <div
+                          style={{
+                            width: '256px',
+                            height: '256px',
+                            overflow: 'hidden',
+                            borderRadius: '4px',
+                            border: '1px solid var(--modal-border-color, #444)',
+                            position: 'relative',
+                          }}
+                        >
+                          <div
+                            style={{
                               position: 'absolute',
-                              top: 0,
-                              left: 0,
-                              right: 0,
-                              bottom: 0,
-                              display: 'flex',
-                              justifyContent: 'center',
-                              alignItems: 'center',
-                              backgroundColor: 'var(--modal-loading-overlay, rgba(0, 0, 0, 0.7))'
-                            }}>
-                              <div className="spinner" style={{
-                                width: '20px',
-                                height: '20px',
-                                borderLeftColor: 'var(--modal-spinner-color, #09f)'
-                              }}></div>
-                            </div>
-                          )}
+                              top: '-128px',
+                              left: '-128px',
+                              width: '512px',
+                              height: '512px',
+                            }}
+                          >
+                            <MapContainer
+                              center={hoodCenter}
+                              zoom={hoodPreviewZoom}
+                              style={{ height: '100%', width: '100%' }}
+                              zoomControl={false}
+                              attributionControl={false}
+                              dragging={false}
+                              scrollWheelZoom={false}
+                              doubleClickZoom={false}
+                              touchZoom={false}
+                              keyboard={false}
+                              boxZoom={false}
+                              maxZoom={20}
+                              minZoom={1}
+                              maxBounds={[
+                                [-85.051129, -180],
+                                [85.051129, 180],
+                              ]}
+                              maxBoundsViscosity={1.0}
+                            >
+                              <SetPreviewView
+                                center={hoodCenter}
+                                zoom={hoodPreviewZoom}
+                              />
+                              <QdnTileLayer fetchTileImage={fetchTileImage} />
+                            </MapContainer>
+                          </div>
                         </div>
-                        <div style={{ position: 'relative', overflow: 'hidden' }}>
-                          {neighborhoodImages[1] && (
-                            <img
-                              src={neighborhoodImages[1]}
-                              alt="Top Right"
-                              style={{
-                                width: '100%',
-                                height: '100%',
-                                objectFit: 'cover'
-                              }}
-                            />
-                          )}
-                          {neighborhoodImageLoading[1] && (
-                            <div style={{
-                              position: 'absolute',
-                              top: 0,
-                              left: 0,
-                              right: 0,
-                              bottom: 0,
-                              display: 'flex',
-                              justifyContent: 'center',
-                              alignItems: 'center',
-                              backgroundColor: 'var(--modal-loading-overlay, rgba(0, 0, 0, 0.7))'
-                            }}>
-                              <div className="spinner" style={{
-                                width: '20px',
-                                height: '20px',
-                                borderLeftColor: 'var(--modal-spinner-color, #09f)'
-                              }}></div>
-                            </div>
-                          )}
-                        </div>
-                        <div style={{ position: 'relative', overflow: 'hidden' }}>
-                          {neighborhoodImages[2] && (
-                            <img
-                              src={neighborhoodImages[2]}
-                              alt="Bottom Left"
-                              style={{
-                                width: '100%',
-                                height: '100%',
-                                objectFit: 'cover'
-                              }}
-                            />
-                          )}
-                          {neighborhoodImageLoading[2] && (
-                            <div style={{
-                              position: 'absolute',
-                              top: 0,
-                              left: 0,
-                              right: 0,
-                              bottom: 0,
-                              display: 'flex',
-                              justifyContent: 'center',
-                              alignItems: 'center',
-                              backgroundColor: 'var(--modal-loading-overlay, rgba(0, 0, 0, 0.7))'
-                            }}>
-                              <div className="spinner" style={{
-                                width: '20px',
-                                height: '20px',
-                                borderLeftColor: 'var(--modal-spinner-color, #09f)'
-                              }}></div>
-                            </div>
-                          )}
-                        </div>
-                        <div style={{ position: 'relative', overflow: 'hidden' }}>
-                          {neighborhoodImages[3] && (
-                            <img
-                              src={neighborhoodImages[3]}
-                              alt="Bottom Right"
-                              style={{
-                                width: '100%',
-                                height: '100%',
-                                objectFit: 'cover'
-                              }}
-                            />
-                          )}
-                          {neighborhoodImageLoading[3] && (
-                            <div style={{
-                              position: 'absolute',
-                              top: 0,
-                              left: 0,
-                              right: 0,
-                              bottom: 0,
-                              display: 'flex',
-                              justifyContent: 'center',
-                              alignItems: 'center',
-                              backgroundColor: 'var(--modal-loading-overlay, rgba(0, 0, 0, 0.7))'
-                            }}>
-                              <div className="spinner" style={{
-                                width: '20px',
-                                height: '20px',
-                                borderLeftColor: 'var(--modal-spinner-color, #09f)'
-                              }}></div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
+                      );
+                    })()
                   ) : (
                     <div
                       style={{
@@ -2100,13 +1991,15 @@ function App() {
                         padding: '20px',
                       }}
                     >
-                      No neighborhood set. You must have a neighborhood set to start a freedom cell.
-                      <p/>
+                      No neighborhood set. You must have a neighborhood set to
+                      start a freedom cell.
+                      <p />
                       First, navigate to your neighborhood on the map.
-                      <p/>
+                      <p />
                       Click "Set Your Neighborhood" to set your neighborhood.
-                      <p/>
-                      You do not need to have a neighborhood set to join someone else's freedom cell.
+                      <p />
+                      You do not need to have a neighborhood set to join someone
+                      else's freedom cell.
                     </div>
                   )}
                 </div>
@@ -2115,7 +2008,11 @@ function App() {
                 <button
                   onClick={() => setShowSetNeighborhoodModal(true)}
                   className="edit-button"
-                  title={userNeighborhood && userNeighborhood.t ? "Reset Your Neighborhood" : "Set Your Neighborhood"}
+                  title={
+                    userNeighborhood && userNeighborhood.t
+                      ? 'Reset Your Neighborhood'
+                      : 'Set Your Neighborhood'
+                  }
                   style={{
                     width: '100%',
                     backgroundColor: '#28a745',
@@ -2126,10 +2023,12 @@ function App() {
                     fontSize: '16px',
                     fontWeight: 'bold',
                     cursor: 'pointer',
-                    marginTop: '10px'
+                    marginTop: '10px',
                   }}
                 >
-                  {userNeighborhood && userNeighborhood.t ? 'Reset Your Neighborhood' : 'Set Your Neighborhood'}
+                  {userNeighborhood && userNeighborhood.t
+                    ? 'Reset Your Neighborhood'
+                    : 'Set Your Neighborhood'}
                 </button>
               </div>
             )}
@@ -2152,20 +2051,26 @@ function App() {
               style={{
                 width: '100%',
                 padding: '15px',
-                backgroundColor: (!userNeighborhood || !userNeighborhood.t) ? '#6c757d' : '#6f42c1',
+                backgroundColor:
+                  !userNeighborhood || !userNeighborhood.t
+                    ? '#6c757d'
+                    : '#6f42c1',
                 color: 'white',
                 border: 'none',
                 borderRadius: '4px',
-                cursor: (!userNeighborhood || !userNeighborhood.t) ? 'not-allowed' : 'pointer',
+                cursor:
+                  !userNeighborhood || !userNeighborhood.t
+                    ? 'not-allowed'
+                    : 'pointer',
                 fontSize: '16px',
                 fontWeight: 'bold',
               }}
             >
-              {hasExistingFreedomCell ? 'Replace Freedom Cell' : 'Start Freedom Cell'}
+              {hasExistingFreedomCell
+                ? 'Replace Freedom Cell'
+                : 'Start Freedom Cell'}
             </button>
           </div>
-
-
         </div>
 
         {/* Right Column: Map */}
@@ -2178,47 +2083,106 @@ function App() {
           }}
         >
           {/* Map Section */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+          <div
+            style={{
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+            }}
+          >
             {/* Status Message */}
-            {addressNames.length === 0  && (
-              <div style={{ marginBottom: '20px', padding: '10px', backgroundColor: '#fff3cd', border: '1px solid #ffeaa7', borderRadius: '4px', textAlign: 'center' }}>
+            {addressNames.length === 0 && (
+              <div
+                style={{
+                  marginBottom: '20px',
+                  padding: '10px',
+                  backgroundColor: '#fff3cd',
+                  border: '1px solid #ffeaa7',
+                  borderRadius: '4px',
+                  textAlign: 'center',
+                }}
+              >
                 No Cartographer names found to load the map
               </div>
             )}
 
             {/* Map Container with Integrated Controls */}
-            <div style={{ position: 'relative', width: '550px', height: '550px' }}>
-              {/* Map Images Container */}
-              <div style={{
-                position: 'absolute',
-                top: '20px',
-                left: '20px',
-                right: '20px',
-                bottom: '20px',
-                overflow: 'hidden',
-                borderRadius: '4px',
-                border: '1px solid #ccc'
-              }}>
+            <div
+              style={{ position: 'relative', width: '550px', height: '550px' }}
+            >
+              {/* Leaflet Map Container */}
+              <div
+                style={{
+                  position: 'absolute',
+                  top: '20px',
+                  left: '20px',
+                  right: '20px',
+                  bottom: '20px',
+                  overflow: 'hidden',
+                  borderRadius: '4px',
+                  border: '1px solid #ccc',
+                  zIndex: 0,
+                }}
+              >
                 {loading ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      height: '100%',
+                    }}
+                  >
                     <p>Fetching map identifiers...</p>
                     <div className="spinner"></div>
                   </div>
                 ) : addressNames.length === 0 ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#999' }}>
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      height: '100%',
+                      color: '#999',
+                    }}
+                  >
                     <p>No names selected</p>
                     <p>Waiting for Cartographer names to load...</p>
                   </div>
                 ) : (
-                  <ImageGrid
-                    images={images}
-                    imageLoading={imageLoading}
+                  <MapContainer
+                    center={[0, 0]}
                     zoom={zoom}
-                    x={x}
-                    y={y}
-                    containerRef={gridContainerRef}
-                    onTileClick={onTileClick}
-                  />
+                    style={{ height: '100%', width: '100%' }}
+                    zoomControl={false}
+                    attributionControl={false}
+                    maxZoom={20}
+                    minZoom={1}
+                    maxBounds={[
+                      [-85.051129, -180],
+                      [85.051129, 180],
+                    ]}
+                    maxBoundsViscosity={1.0}
+                  >
+                    <MapViewSync
+                      zoom={zoom}
+                      x={x}
+                      y={y}
+                      setZoom={setZoom}
+                      setX={setX}
+                      setY={setY}
+                      mapRef={mapRef}
+                    />
+                    <QdnTileLayer fetchTileImage={fetchTileImage} />
+                    <MapBoundsReporter onBoundsChange={setMapBounds} />
+                    <FreedomCellMarkersLayer
+                      cells={cellsInBounds}
+                      zoom={zoom}
+                    />
+                  </MapContainer>
                 )}
               </div>
 
@@ -2231,55 +2195,322 @@ function App() {
                 style={{ position: 'absolute', top: '0', left: '0' }}
               ></button>
 
-              {/* Zoom Controls - Top Right Corner */}
-              <div style={{ position: 'absolute', top: '0', right: '0', display: 'flex', flexDirection: 'column' }}>
-                <button
-                  onClick={handleZoomIn}
-                  disabled={isButtonDisabled(1, 1, zoom + 1) || addressNames.length === 0}
-                  className="zoom-button zoom-plus"
-                  title="Zoom In"
-                  style={{ borderRadius: '4px 4px 0 0' }}
-                ></button>
-                <button
-                  onClick={handleZoomOut}
-                  disabled={isButtonDisabled(1, 1, zoom - 1) || addressNames.length === 0}
-                  className="zoom-button zoom-minus"
-                  title="Zoom Out"
-                  style={{ borderRadius: '0 0 4px 4px', marginTop: '1px' }}
-                ></button>
+              {/* Export missing tiles + Zoom Controls - Top Right Corner */}
+              <div
+                style={{
+                  position: 'absolute',
+                  top: '0',
+                  right: '0',
+                  display: 'flex',
+                  flexDirection: 'row',
+                  alignItems: 'flex-start',
+                  gap: '4px',
+                }}
+              >
+                {/* <button
+                  type="button"
+                  onClick={() => setExportMissingOpen(true)}
+                  disabled={!mapBounds || addressNames.length === 0}
+                  title="Export missing tiles in current view"
+                  className="export-missing-btn"
+                >
+                  Export missing
+                </button> */}
+                <Dialog
+                  open={exportMissingOpen}
+                  onClose={handleExportMissingDialogClose}
+                  maxWidth="sm"
+                  fullWidth
+                >
+                  <DialogTitle>Export missing tiles</DialogTitle>
+                  <DialogContent
+                    sx={{
+                      color: theme === EnumTheme.DARK ? '#e0e0e0' : '#1a1a1a',
+                    }}
+                  >
+                    <Spacer height="25px" />
+                    {!exportMissingData ? (
+                      <div
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 16,
+                          width: '100%',
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 14,
+                            fontWeight: 500,
+                            marginBottom: 6,
+                            color:
+                              theme === EnumTheme.DARK ? '#e0e0e0' : '#333',
+                          }}
+                        >
+                          Levels deeper
+                        </div>
+                        <FormControl
+                          size="small"
+                          fullWidth
+                          variant="outlined"
+                          sx={{
+                            '& .MuiOutlinedInput-root': {
+                              color: 'inherit',
+                              backgroundColor:
+                                theme === EnumTheme.DARK
+                                  ? 'rgba(255,255,255,0.08)'
+                                  : 'rgba(0,0,0,0.04)',
+                              '& fieldset': {
+                                borderColor:
+                                  theme === EnumTheme.DARK
+                                    ? '#666'
+                                    : 'rgba(0,0,0,0.23)',
+                              },
+                              '&:hover fieldset': {
+                                borderColor:
+                                  theme === EnumTheme.DARK
+                                    ? '#888'
+                                    : 'rgba(0,0,0,0.4)',
+                              },
+                            },
+                          }}
+                        >
+                          <Select
+                            value={exportMissingDepth}
+                            displayEmpty
+                            onChange={(e) =>
+                              setExportMissingDepth(
+                                Number(e.target.value) as 0 | 1 | 2 | 3
+                              )
+                            }
+                            sx={{ color: 'inherit' }}
+                            renderValue={(v) =>
+                              v === 0
+                                ? '0 (current zoom only)'
+                                : String(v)
+                            }
+                          >
+                            <MenuItem value={0}>0 (current zoom only)</MenuItem>
+                            <MenuItem value={1}>1</MenuItem>
+                            <MenuItem value={2}>2</MenuItem>
+                            <MenuItem value={3}>3</MenuItem>
+                          </Select>
+                        </FormControl>
+                        <Button
+                          variant="contained"
+                          onClick={async () => {
+                            setExportMissingLoading(true);
+                            try {
+                              const data =
+                                await getMissingTilesInBounds(
+                                  exportMissingDepth
+                                );
+                              setExportMissingData(data);
+                            } finally {
+                              setExportMissingLoading(false);
+                            }
+                          }}
+                          disabled={exportMissingLoading}
+                          startIcon={
+                            exportMissingLoading ? (
+                              <CircularProgress size={18} color="inherit" />
+                            ) : null
+                          }
+                        >
+                          {exportMissingLoading ? 'Generating…' : 'Generate'}
+                        </Button>
+                      </div>
+                    ) : (
+                      <div>
+                        <div
+                          style={{
+                            marginBottom: 12,
+                            fontSize: 14,
+                            color:
+                              theme === EnumTheme.DARK ? '#e0e0e0' : '#333',
+                          }}
+                        >
+                          {(() => {
+                            const totalMissing = exportMissingData.reduce(
+                              (sum, [, tiles]) => sum + tiles.length,
+                              0
+                            );
+                            const jsonStr = JSON.stringify(
+                              exportMissingData,
+                              null,
+                              2
+                            );
+                            const bytes = new Blob([jsonStr]).size;
+                            const sizeStr =
+                              bytes < 1024
+                                ? `${bytes} B`
+                                : bytes < 1024 * 1024
+                                  ? `${(bytes / 1024).toFixed(1)} KB`
+                                  : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+                            return (
+                              <>
+                                <strong>{totalMissing.toLocaleString()}</strong>{' '}
+                                missing tile
+                                {totalMissing !== 1 ? 's' : ''} across{' '}
+                                {exportMissingData.length} zoom level
+                                {exportMissingData.length !== 1 ? 's' : ''}
+                                {' · '}
+                                File size: <strong>{sizeStr}</strong>
+                              </>
+                            );
+                          })()}
+                        </div>
+                        <div
+                          style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}
+                        >
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            sx={{
+                              color: 'inherit',
+                              borderColor:
+                                theme === EnumTheme.DARK ? '#888' : undefined,
+                            }}
+                            onClick={async () => {
+                              if (!exportMissingData) return;
+                              await navigator.clipboard.writeText(
+                                JSON.stringify(exportMissingData)
+                              );
+                            }}
+                          >
+                            Copy as JSON
+                          </Button>
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            sx={{
+                              color: 'inherit',
+                              borderColor:
+                                theme === EnumTheme.DARK ? '#888' : undefined,
+                            }}
+                            onClick={() => {
+                              if (!exportMissingData) return;
+                              const blob = new Blob(
+                                [JSON.stringify(exportMissingData, null, 2)],
+                                { type: 'application/json' }
+                              );
+                              const a = document.createElement('a');
+                              a.href = URL.createObjectURL(blob);
+                              a.download = `missing-tiles-z${zoom}.json`;
+                              a.click();
+                              URL.revokeObjectURL(a.href);
+                            }}
+                          >
+                            Download JSON
+                          </Button>
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            sx={{
+                              color: 'inherit',
+                              borderColor:
+                                theme === EnumTheme.DARK ? '#888' : undefined,
+                            }}
+                            onClick={() => setExportMissingData(null)}
+                          >
+                            Generate again
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </DialogContent>
+                  <DialogActions
+                    sx={{
+                      color: theme === EnumTheme.DARK ? '#e0e0e0' : '#1a1a1a',
+                    }}
+                  >
+                    <Button
+                      onClick={handleExportMissingDialogClose}
+                      sx={{
+                        color: 'inherit',
+                      }}
+                    >
+                      Close
+                    </Button>
+                  </DialogActions>
+                </Dialog>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <button
+                    onClick={handleZoomIn}
+                    disabled={zoom >= 20 || addressNames.length === 0}
+                    className="zoom-button zoom-plus"
+                    title="Zoom In"
+                    style={{ borderRadius: '4px 4px 0 0' }}
+                  ></button>
+                  <button
+                    onClick={handleZoomOut}
+                    disabled={zoom <= 1 || addressNames.length === 0}
+                    className="zoom-button zoom-minus"
+                    title="Zoom Out"
+                    style={{ borderRadius: '0 0 4px 4px', marginTop: '1px' }}
+                  ></button>
+                </div>
               </div>
 
               {/* Arrow Controls - Centered on Edges */}
               <button
-                onClick={() => handleUpdateCoordinates(x, y - 1)}
-                disabled={isButtonDisabled(x, y - 1, zoom) || addressNames.length === 0}
+                onClick={() => handlePan(0, -1)}
+                disabled={
+                  isButtonDisabled(x, y - 1, zoom) || addressNames.length === 0
+                }
                 className="arrow-button arrow-up"
                 title="Pan Up"
-                style={{ position: 'absolute', top: '0', left: '50%', transform: 'translateX(-50%)' }}
+                style={{
+                  position: 'absolute',
+                  top: '0',
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                }}
               ></button>
 
               <button
-                onClick={() => handleUpdateCoordinates(x - 1, y)}
-                disabled={isButtonDisabled(x - 1, y, zoom) || addressNames.length === 0}
+                onClick={() => handlePan(-1, 0)}
+                disabled={
+                  isButtonDisabled(x - 1, y, zoom) || addressNames.length === 0
+                }
                 className="arrow-button arrow-left"
                 title="Pan Left"
-                style={{ position: 'absolute', left: '0', top: '50%', transform: 'translateY(-50%)' }}
+                style={{
+                  position: 'absolute',
+                  left: '0',
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                }}
               ></button>
 
               <button
-                onClick={() => handleUpdateCoordinates(x + 1, y)}
-                disabled={isButtonDisabled(x + 2, y, zoom) || addressNames.length === 0}
+                onClick={() => handlePan(1, 0)}
+                disabled={
+                  isButtonDisabled(x + 1, y, zoom) || addressNames.length === 0
+                }
                 className="arrow-button arrow-right"
                 title="Pan Right"
-                style={{ position: 'absolute', right: '0', top: '50%', transform: 'translateY(-50%)' }}
+                style={{
+                  position: 'absolute',
+                  right: '0',
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                }}
               ></button>
 
               <button
-                onClick={() => handleUpdateCoordinates(x, y + 1)}
-                disabled={isButtonDisabled(x, y + 2, zoom) || addressNames.length === 0}
+                onClick={() => handlePan(0, 1)}
+                disabled={
+                  isButtonDisabled(x, y + 1, zoom) || addressNames.length === 0
+                }
                 className="arrow-button arrow-down"
                 title="Pan Down"
-                style={{ position: 'absolute', bottom: '0', left: '50%', transform: 'translateX(-50%)' }}
+                style={{
+                  position: 'absolute',
+                  bottom: '0',
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                }}
               ></button>
 
               {/* Search Button - Bottom Left Corner */}
@@ -2333,16 +2564,25 @@ function App() {
               border: '1px solid var(--modal-border-color, #444)',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '15px',
+              }}
+            >
               <h4
                 style={{
                   margin: 0,
                   color: 'var(--modal-text-color, #e0e0e0)',
                 }}
               >
-                Please select the following map data publishers to increase map image availability for yourself
-                and others on the Qortal Data Network (QDN). Once you do, your node will periodically fetch the
-                images from these publishers and store them with the rest of your data.
+                Please select the following map data publishers to increase map
+                image availability for yourself and others on the Qortal Data
+                Network (QDN). Once you do, your node will periodically fetch
+                the images from these publishers and store them with the rest of
+                your data.
               </h4>
               <button
                 onClick={() => setShowAddressNamesModal(false)}
@@ -2360,8 +2600,16 @@ function App() {
 
             {addressNamesLoading ? (
               <div style={{ textAlign: 'center', padding: '20px' }}>
-                <div className="spinner" style={{ margin: '0 auto 10px' }}></div>
-                <p style={{ margin: 0, color: 'var(--modal-text-color, #e0e0e0)' }}>
+                <div
+                  className="spinner"
+                  style={{ margin: '0 auto 10px' }}
+                ></div>
+                <p
+                  style={{
+                    margin: 0,
+                    color: 'var(--modal-text-color, #e0e0e0)',
+                  }}
+                >
                   Fetching address names...
                 </p>
               </div>
@@ -2381,19 +2629,26 @@ function App() {
               </div>
             ) : (
               <div>
-                <div style={{
-                  marginBottom: '10px',
-                  fontSize: '14px',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center'
-                }}>
+                <div
+                  style={{
+                    marginBottom: '10px',
+                    fontSize: '14px',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}
+                >
                   <strong>Names ({addressNames.length}):</strong>
                   <div style={{ display: 'flex', alignItems: 'center' }}>
                     <input
                       type="checkbox"
                       id="select-all"
-                      checked={addressNames.length > 0 && addressNames.every(name => followedNames.includes(name))}
+                      checked={
+                        addressNames.length > 0 &&
+                        addressNames.every((name) =>
+                          followedNames.includes(name)
+                        )
+                      }
                       onChange={(e) => handleSelectAll(e.target.checked)}
                       style={{
                         marginRight: '5px',
@@ -2401,18 +2656,22 @@ function App() {
                         height: '14px',
                       }}
                     />
-                    <label htmlFor="select-all" style={{ cursor: 'pointer' }}>Select All</label>
+                    <label htmlFor="select-all" style={{ cursor: 'pointer' }}>
+                      Select All
+                    </label>
                   </div>
                 </div>
 
                 {addressNames.length > 0 ? (
-                  <div style={{
-                    maxHeight: '300px',
-                    overflowY: 'auto',
-                    border: '1px solid var(--modal-border-color, #444)',
-                    borderRadius: '4px',
-                    padding: '10px'
-                  }}>
+                  <div
+                    style={{
+                      maxHeight: '300px',
+                      overflowY: 'auto',
+                      border: '1px solid var(--modal-border-color, #444)',
+                      borderRadius: '4px',
+                      padding: '10px',
+                    }}
+                  >
                     {addressNames
                       .slice()
                       .sort((a, b) => {
@@ -2425,18 +2684,26 @@ function App() {
                       .map((name, index) => {
                         const isFollowed = followedNames.includes(name);
                         return (
-                          <div key={name} style={{
-                            padding: '8px',
-                            borderBottom: index < addressNames.length - 1 ? '1px solid var(--modal-border-color, #444)' : 'none',
-                            fontSize: '14px',
-                            display: 'flex',
-                            alignItems: 'center',
-                          }}>
+                          <div
+                            key={name}
+                            style={{
+                              padding: '8px',
+                              borderBottom:
+                                index < addressNames.length - 1
+                                  ? '1px solid var(--modal-border-color, #444)'
+                                  : 'none',
+                              fontSize: '14px',
+                              display: 'flex',
+                              alignItems: 'center',
+                            }}
+                          >
                             <input
                               type="checkbox"
                               id={`name-${name}`}
                               checked={isFollowed}
-                              onChange={(e) => handleCheckboxChange(name, e.target.checked)}
+                              onChange={(e) =>
+                                handleCheckboxChange(name, e.target.checked)
+                              }
                               style={{
                                 marginRight: '10px',
                                 width: '16px',
@@ -2448,7 +2715,7 @@ function App() {
                               style={{
                                 cursor: 'pointer',
                                 color: 'var(--modal-text-color, #e0e0e0)',
-                                flex: 1
+                                flex: 1,
                               }}
                             >
                               {name}
@@ -2458,13 +2725,15 @@ function App() {
                       })}
                   </div>
                 ) : (
-                  <div style={{
-                    padding: '10px',
-                    fontSize: '14px',
-                    fontStyle: 'italic',
-                    textAlign: 'center',
-                    color: 'var(--modal-text-color, #e0e0e0)'
-                  }}>
+                  <div
+                    style={{
+                      padding: '10px',
+                      fontSize: '14px',
+                      fontStyle: 'italic',
+                      textAlign: 'center',
+                      color: 'var(--modal-text-color, #e0e0e0)',
+                    }}
+                  >
                     No names found for this address
                   </div>
                 )}
@@ -2544,165 +2813,45 @@ function App() {
             >
               <div
                 style={{
-                  display: 'grid',
-                  gridTemplateColumns: '1fr 1fr',
-                  gridTemplateRows: '1fr 1fr',
-                  width: '100%',
-                  height: '100%',
+                  position: 'absolute',
+                  top: '-128px',
+                  left: '-128px',
+                  width: '512px',
+                  height: '512px',
                 }}
               >
-                <div style={{ position: 'relative', overflow: 'hidden' }}>
-                  {images[0] && (
-                    <img
-                      src={images[0]}
-                      alt="Top Left"
-                      style={{
-                        width: '100%',
-                        height: '100%',
-                        objectFit: 'cover',
-                      }}
-                    />
-                  )}
-                  {imageLoading[0] && (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        display: 'flex',
-                        justifyContent: 'center',
-                        alignItems: 'center',
-                        backgroundColor:
-                          'var(--modal-loading-overlay, rgba(0, 0, 0, 0.7))',
-                      }}
-                    >
-                      <div
-                        className="spinner"
-                        style={{
-                          width: '20px',
-                          height: '20px',
-                          borderLeftColor: 'var(--modal-spinner-color, #09f)',
-                        }}
-                      ></div>
-                    </div>
-                  )}
-                </div>
-                <div style={{ position: 'relative', overflow: 'hidden' }}>
-                  {images[1] && (
-                    <img
-                      src={images[1]}
-                      alt="Top Right"
-                      style={{
-                        width: '100%',
-                        height: '100%',
-                        objectFit: 'cover',
-                      }}
-                    />
-                  )}
-                  {imageLoading[1] && (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        display: 'flex',
-                        justifyContent: 'center',
-                        alignItems: 'center',
-                        backgroundColor:
-                          'var(--modal-loading-overlay, rgba(0, 0, 0, 0.7))',
-                      }}
-                    >
-                      <div
-                        className="spinner"
-                        style={{
-                          width: '20px',
-                          height: '20px',
-                          borderLeftColor: 'var(--modal-spinner-color, #09f)',
-                        }}
-                      ></div>
-                    </div>
-                  )}
-                </div>
-                <div style={{ position: 'relative', overflow: 'hidden' }}>
-                  {images[2] && (
-                    <img
-                      src={images[2]}
-                      alt="Bottom Left"
-                      style={{
-                        width: '100%',
-                        height: '100%',
-                        objectFit: 'cover',
-                      }}
-                    />
-                  )}
-                  {imageLoading[2] && (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        display: 'flex',
-                        justifyContent: 'center',
-                        alignItems: 'center',
-                        backgroundColor:
-                          'var(--modal-loading-overlay, rgba(0, 0, 0, 0.7))',
-                      }}
-                    >
-                      <div
-                        className="spinner"
-                        style={{
-                          width: '20px',
-                          height: '20px',
-                          borderLeftColor: 'var(--modal-spinner-color, #09f)',
-                        }}
-                      ></div>
-                    </div>
-                  )}
-                </div>
-                <div style={{ position: 'relative', overflow: 'hidden' }}>
-                  {images[3] && (
-                    <img
-                      src={images[3]}
-                      alt="Bottom Right"
-                      style={{
-                        width: '100%',
-                        height: '100%',
-                        objectFit: 'cover',
-                      }}
-                    />
-                  )}
-                  {imageLoading[3] && (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        display: 'flex',
-                        justifyContent: 'center',
-                        alignItems: 'center',
-                        backgroundColor:
-                          'var(--modal-loading-overlay, rgba(0, 0, 0, 0.7))',
-                      }}
-                    >
-                      <div
-                        className="spinner"
-                        style={{
-                          width: '20px',
-                          height: '20px',
-                          borderLeftColor: 'var(--modal-spinner-color, #09f)',
-                        }}
-                      ></div>
-                    </div>
-                  )}
-                </div>
+                <MapContainer
+                  center={
+                    mapRef.current?.getCenter() ??
+                    tileToLatLng(zoom, x + 0.5, y + 0.5)
+                  }
+                  zoom={mapRef.current?.getZoom() ?? zoom}
+                  style={{ height: '100%', width: '100%' }}
+                  zoomControl={false}
+                  attributionControl={false}
+                  dragging={false}
+                  scrollWheelZoom={false}
+                  doubleClickZoom={false}
+                  touchZoom={false}
+                  keyboard={false}
+                  boxZoom={false}
+                  maxZoom={20}
+                  minZoom={1}
+                  maxBounds={[
+                    [-85.051129, -180],
+                    [85.051129, 180],
+                  ]}
+                  maxBoundsViscosity={1.0}
+                >
+                  <SetPreviewView
+                    center={
+                      mapRef.current?.getCenter() ??
+                      tileToLatLng(zoom, x + 0.5, y + 0.5)
+                    }
+                    zoom={Math.max(1, (mapRef.current?.getZoom() ?? zoom) - 1)}
+                  />
+                  <QdnTileLayer fetchTileImage={fetchTileImage} />
+                </MapContainer>
               </div>
             </div>
 
@@ -2833,7 +2982,9 @@ function App() {
                 color: 'var(--modal-text-color, #e0e0e0)',
               }}
             >
-              {hasExistingFreedomCell ? 'Replace Freedom Cell' : 'Start Freedom Cell'}
+              {hasExistingFreedomCell
+                ? 'Replace Freedom Cell'
+                : 'Start Freedom Cell'}
             </h2>
 
             {hasExistingFreedomCell && (
@@ -2848,7 +2999,9 @@ function App() {
                   marginBottom: '15px',
                 }}
               >
-                <strong>Warning:</strong> Your current Freedom Cell will still exist as a group on Qortal, but it will no longer be classified as a Freedom Cell once this new Freedom Cell is started.
+                <strong>Warning:</strong> Your current Freedom Cell will still
+                exist as a group on Qortal, but it will no longer be classified
+                as a Freedom Cell once this new Freedom Cell is started.
               </div>
             )}
 
@@ -2891,16 +3044,19 @@ function App() {
                     color: theme === EnumTheme.DARK ? '#e0e0e0' : '#333',
                   }}
                 />
-                <div style={{
-                  textAlign: 'right',
-                  fontSize: '12px',
-                  marginTop: '4px',
-                  color: freedomCellName.length >= 32
-                    ? '#dc3545'
-                    : freedomCellName.length >= 26
-                      ? '#ffc107'
-                      : 'var(--modal-text-color, #999)',
-                }}>
+                <div
+                  style={{
+                    textAlign: 'right',
+                    fontSize: '12px',
+                    marginTop: '4px',
+                    color:
+                      freedomCellName.length >= 32
+                        ? '#dc3545'
+                        : freedomCellName.length >= 26
+                          ? '#ffc107'
+                          : 'var(--modal-text-color, #999)',
+                  }}
+                >
                   {freedomCellName.length}/32
                 </div>
               </div>
@@ -2936,23 +3092,38 @@ function App() {
                     resize: 'vertical',
                   }}
                 />
-                <div style={{
-                  textAlign: 'right',
-                  fontSize: '12px',
-                  marginTop: '4px',
-                  color: groupDescription.length >= 120
-                    ? '#dc3545'
-                    : groupDescription.length >= 100
-                      ? '#ffc107'
-                      : 'var(--modal-text-color, #999)',
-                }}>
+                <div
+                  style={{
+                    textAlign: 'right',
+                    fontSize: '12px',
+                    marginTop: '4px',
+                    color:
+                      groupDescription.length >= 120
+                        ? '#dc3545'
+                        : groupDescription.length >= 100
+                          ? '#ffc107'
+                          : 'var(--modal-text-color, #999)',
+                  }}
+                >
                   {groupDescription.length}/120
                 </div>
               </div>
 
               <div style={{ marginBottom: '15px' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '10px',
+                  }}
+                >
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      cursor: 'pointer',
+                    }}
+                  >
                     <input
                       type="radio"
                       name="freedomCellType"
@@ -2962,9 +3133,17 @@ function App() {
                       disabled={isStartingFreedomCell}
                       style={{ marginRight: '8px' }}
                     />
-                    <span style={{ fontSize: '14px' }}>Closed (private) - users need permission to join</span>
+                    <span style={{ fontSize: '14px' }}>
+                      Closed (private) - users need permission to join
+                    </span>
                   </label>
-                  <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      cursor: 'pointer',
+                    }}
+                  >
                     <input
                       type="radio"
                       name="freedomCellType"
@@ -3032,7 +3211,13 @@ function App() {
                     fontSize: '14px',
                   }}
                 >
-                  {isStartingFreedomCell ? (hasExistingFreedomCell ? 'Replacing...' : 'Creating...') : (hasExistingFreedomCell ? 'Replace Cell' : 'Create Cell')}
+                  {isStartingFreedomCell
+                    ? hasExistingFreedomCell
+                      ? 'Replacing...'
+                      : 'Creating...'
+                    : hasExistingFreedomCell
+                      ? 'Replace Cell'
+                      : 'Create Cell'}
                 </button>
               </div>
             </form>
@@ -3082,27 +3267,40 @@ function App() {
 
             {isCheckingForGroupTransaction ? (
               <div style={{ marginBottom: '15px' }}>
-                <div style={{ fontSize: '14px', textAlign: 'center', marginBottom: '10px' }}>
-                  PLEASE WAIT! You'll need to accept one more data publish before your Freedom Cell is complete...
+                <div
+                  style={{
+                    fontSize: '14px',
+                    textAlign: 'center',
+                    marginBottom: '10px',
+                  }}
+                >
+                  PLEASE WAIT! You'll need to accept one more data publish
+                  before your Freedom Cell is complete...
                 </div>
-                <div style={{
-                  width: '100%',
-                  height: '4px',
-                  backgroundColor: theme === EnumTheme.DARK ? '#444' : '#e9ecef',
-                  borderRadius: '2px',
-                  overflow: 'hidden',
-                  position: 'relative'
-                }}>
-                  <div style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    height: '100%',
-                    width: '30%',
-                    backgroundColor: '#6f42c1',
+                <div
+                  style={{
+                    width: '100%',
+                    height: '4px',
+                    backgroundColor:
+                      theme === EnumTheme.DARK ? '#444' : '#e9ecef',
                     borderRadius: '2px',
-                    animation: 'indeterminateProgress 1.5s infinite ease-in-out'
-                  }}></div>
+                    overflow: 'hidden',
+                    position: 'relative',
+                  }}
+                >
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      height: '100%',
+                      width: '30%',
+                      backgroundColor: '#6f42c1',
+                      borderRadius: '2px',
+                      animation:
+                        'indeterminateProgress 1.5s infinite ease-in-out',
+                    }}
+                  ></div>
                 </div>
               </div>
             ) : (
@@ -3131,11 +3329,15 @@ function App() {
                 disabled={isCheckingForGroupTransaction}
                 style={{
                   padding: '8px 16px',
-                  backgroundColor: isCheckingForGroupTransaction ? '#6c757d' : '#6c757d',
+                  backgroundColor: isCheckingForGroupTransaction
+                    ? '#6c757d'
+                    : '#6c757d',
                   color: 'white',
                   border: 'none',
                   borderRadius: '4px',
-                  cursor: isCheckingForGroupTransaction ? 'not-allowed' : 'pointer',
+                  cursor: isCheckingForGroupTransaction
+                    ? 'not-allowed'
+                    : 'pointer',
                   fontSize: '14px',
                 }}
               >
@@ -3146,11 +3348,15 @@ function App() {
                 disabled={isCheckingForGroupTransaction}
                 style={{
                   padding: '8px 16px',
-                  backgroundColor: isCheckingForGroupTransaction ? '#6c757d' : '#6f42c1',
+                  backgroundColor: isCheckingForGroupTransaction
+                    ? '#6c757d'
+                    : '#6f42c1',
                   color: 'white',
                   border: 'none',
                   borderRadius: '4px',
-                  cursor: isCheckingForGroupTransaction ? 'not-allowed' : 'pointer',
+                  cursor: isCheckingForGroupTransaction
+                    ? 'not-allowed'
+                    : 'pointer',
                   fontSize: '14px',
                 }}
               >
@@ -3201,7 +3407,13 @@ function App() {
               Error
             </h2>
 
-            <div style={{ marginBottom: '20px', fontSize: '14px', textAlign: 'center' }}>
+            <div
+              style={{
+                marginBottom: '20px',
+                fontSize: '14px',
+                textAlign: 'center',
+              }}
+            >
               {freedomCellError}
             </div>
 
@@ -3277,7 +3489,13 @@ function App() {
               Success
             </h2>
 
-            <div style={{ marginBottom: '20px', fontSize: '14px', textAlign: 'center' }}>
+            <div
+              style={{
+                marginBottom: '20px',
+                fontSize: '14px',
+                textAlign: 'center',
+              }}
+            >
               {freedomCellSuccess}
             </div>
 
@@ -3344,7 +3562,14 @@ function App() {
               border: '1px solid var(--modal-border-color, #444)',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '15px',
+              }}
+            >
               <h2
                 style={{
                   margin: 0,
@@ -3369,7 +3594,12 @@ function App() {
 
             <form
               onSubmit={handleSearchQuerySubmit}
-              style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', marginBottom: '15px' }}
+              style={{
+                display: 'flex',
+                gap: '10px',
+                alignItems: 'flex-end',
+                marginBottom: '15px',
+              }}
             >
               <div style={{ flex: 1 }}>
                 <label
@@ -3444,7 +3674,8 @@ function App() {
             />
 
             <div style={{ marginTop: '10px', fontSize: '12px', color: '#666' }}>
-              Search indices for terms - filtered by category 9, sorted by score (descending). Click links to navigate.
+              Search indices for terms - filtered by category 9, sorted by score
+              (descending). Click links to navigate.
             </div>
           </div>
         </div>
@@ -3481,7 +3712,14 @@ function App() {
               border: '1px solid var(--modal-border-color, #444)',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '15px',
+              }}
+            >
               <h2
                 style={{
                   margin: 0,
@@ -3506,7 +3744,12 @@ function App() {
 
             <form
               onSubmit={handleIndexSubmit}
-              style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', marginBottom: '15px' }}
+              style={{
+                display: 'flex',
+                gap: '10px',
+                alignItems: 'flex-end',
+                marginBottom: '15px',
+              }}
             >
               <div style={{ flex: 1 }}>
                 <label
@@ -3643,7 +3886,8 @@ function App() {
             )}
 
             <div style={{ fontSize: '12px', color: '#666' }}>
-              Enter a term to generate a unique index identifier and build object
+              Enter a term to generate a unique index identifier and build
+              object
             </div>
           </div>
         </div>
@@ -3694,11 +3938,29 @@ function App() {
             {freedomCellsError}
           </div>
         ) : freedomCellsData.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '20px', color: panelStyles.color }}>
+          <div
+            style={{
+              textAlign: 'center',
+              padding: '20px',
+              color: panelStyles.color,
+            }}
+          >
             No Freedom Cells found
           </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>
+            {mapBounds && (
+              <p
+                style={{
+                  fontSize: '12px',
+                  color: panelStyles.color,
+                  marginBottom: '8px',
+                }}
+              >
+                Showing {cellsInBounds.length} of {freedomCellsData.length}{' '}
+                cells in map view
+              </p>
+            )}
             <table
               style={{
                 width: '100%',
@@ -3707,252 +3969,253 @@ function App() {
               }}
             >
               <thead>
-              <tr style={{ backgroundColor: theme === EnumTheme.DARK ? '#444' : '#f2f2f2' }}>
-                <th
+                <tr
                   style={{
-                    padding: '10px',
-                    textAlign: 'left',
-                    borderBottom: '1px solid #ddd',
-                    color: panelStyles.color,
+                    backgroundColor:
+                      theme === EnumTheme.DARK ? '#444' : '#f2f2f2',
                   }}
                 >
-                  Freedom Cell Name
-                </th>
-                <th
-                  style={{
-                    padding: '10px',
-                    textAlign: 'left',
-                    borderBottom: '1px solid #ddd',
-                    color: panelStyles.color,
-                  }}
-                >
-                  Location
-                </th>
-                <th
-                  style={{
-                    padding: '10px',
-                    textAlign: 'left',
-                    borderBottom: '1px solid #ddd',
-                    color: panelStyles.color,
-                  }}
-                >
-                  Description
-                </th>
-                <th
-                  style={{
-                    padding: '10px',
-                    textAlign: 'left',
-                    borderBottom: '1px solid #ddd',
-                    color: panelStyles.color,
-                  }}
-                >
-                  Creator
-                </th>
-                <th
-                  style={{
-                    padding: '10px',
-                    textAlign: 'left',
-                    borderBottom: '1px solid #ddd',
-                    color: panelStyles.color,
-                  }}
-                >
-                  Time Created
-                </th>
-                <th
-                  style={{
-                    padding: '10px',
-                    textAlign: 'left',
-                    borderBottom: '1px solid #ddd',
-                    color: panelStyles.color,
-                  }}
-                >
-                  Action
-                </th>
-              </tr>
+                  <th
+                    style={{
+                      padding: '10px',
+                      textAlign: 'left',
+                      borderBottom: '1px solid #ddd',
+                      color: panelStyles.color,
+                    }}
+                  >
+                    Freedom Cell Name
+                  </th>
+                  <th
+                    style={{
+                      padding: '10px',
+                      textAlign: 'left',
+                      borderBottom: '1px solid #ddd',
+                      color: panelStyles.color,
+                    }}
+                  >
+                    Location
+                  </th>
+                  <th
+                    style={{
+                      padding: '10px',
+                      textAlign: 'left',
+                      borderBottom: '1px solid #ddd',
+                      color: panelStyles.color,
+                    }}
+                  >
+                    Description
+                  </th>
+                  <th
+                    style={{
+                      padding: '10px',
+                      textAlign: 'left',
+                      borderBottom: '1px solid #ddd',
+                      color: panelStyles.color,
+                    }}
+                  >
+                    Creator
+                  </th>
+                  <th
+                    style={{
+                      padding: '10px',
+                      textAlign: 'left',
+                      borderBottom: '1px solid #ddd',
+                      color: panelStyles.color,
+                    }}
+                  >
+                    Time Created
+                  </th>
+                  <th
+                    style={{
+                      padding: '10px',
+                      textAlign: 'left',
+                      borderBottom: '1px solid #ddd',
+                      color: panelStyles.color,
+                    }}
+                  >
+                    Action
+                  </th>
+                </tr>
               </thead>
               <tbody>
-              {freedomCellsData.map((cell, index) => (
-                <tr
-                  key={index}
-                  style={{
-                    backgroundColor: index % 2 === 0
-                      ? (theme === EnumTheme.DARK ? '#333' : '#ffffff')
-                      : (theme === EnumTheme.DARK ? '#3a3a3a' : '#f9f9f9'),
-                  }}
-                >
-                  <td
+                {cellsInBounds.map((cell, index) => (
+                  <tr
+                    key={index}
                     style={{
-                      padding: '10px',
-                      borderBottom: '1px solid #ddd',
-                      color: panelStyles.color,
+                      backgroundColor:
+                        index % 2 === 0
+                          ? theme === EnumTheme.DARK
+                            ? '#333'
+                            : '#ffffff'
+                          : theme === EnumTheme.DARK
+                            ? '#3a3a3a'
+                            : '#f9f9f9',
                     }}
                   >
-                    {cell.name}
-                  </td>
-                  <td
-                    style={{
-                      padding: '10px',
-                      borderBottom: '1px solid #ddd',
-                      color: panelStyles.color,
-                    }}
-                  >
-                    <button
-                      onClick={() => {
-                        try {
-                          console.log('Navigating to location:', cell.location);
-
-                          // Parse the location string (format: "zoom-x-y")
-                          const parts = cell.location.split('-');
-
-                          if (parts.length !== 3) {
-                            console.error('Invalid location format. Expected: zoom-x-y, got:', cell.location);
-                            showErrorModal('Invalid location format. Expected format: zoom-x-y');
-                            return;
-                          }
-
-                          const newZoom = parseInt(parts[0]);
-                          const newX = parseInt(parts[1]);
-                          const newY = parseInt(parts[2]);
-
-                          // Validate the parsed values
-                          if (isNaN(newZoom) || isNaN(newX) || isNaN(newY)) {
-                            console.error('Invalid coordinates in location:', cell.location);
-                            showErrorModal('Invalid coordinates in location');
-                            return;
-                          }
-
-                          if (newZoom < 0 || newZoom > 20) {
-                            console.error('Invalid zoom level in location:', newZoom);
-                            showErrorModal(`Invalid zoom level: ${newZoom}. Must be between 0 and 20`);
-                            return;
-                          }
-
-                          if (newX < 0 || newY < 0) {
-                            console.error('Invalid coordinates in location:', newX, newY);
-                            showErrorModal(`Invalid coordinates: X and Y must be non-negative`);
-                            return;
-                          }
-
-                          if (newX >= 2 ** newZoom || newY >= 2 ** newZoom) {
-                            console.error('Coordinates out of bounds for zoom level:', { newX, newY, newZoom });
-                            showErrorModal(`Coordinates out of bounds for zoom level ${newZoom}`);
-                            return;
-                          }
-
-                          // Update the state with new values
-                          console.log('Navigating to:', { zoom: newZoom, x: newX, y: newY });
-                          setZoom(newZoom);
-                          setX(newX);
-                          setY(newY);
-                        } catch (error) {
-                          console.error('Error processing location:', error);
-                          showErrorModal('Error processing location coordinates');
-                        }
-                      }}
+                    <td
                       style={{
-                        padding: '6px 12px',
-                        backgroundColor: theme === EnumTheme.DARK ? '#28a745' : '#28a745',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        fontSize: '14px',
-                        fontWeight: 'bold',
-                        transition: 'background-color 0.2s',
+                        padding: '10px',
+                        borderBottom: '1px solid #ddd',
+                        color: panelStyles.color,
                       }}
-                      title={`Navigate to ${cell.location}`}
                     >
-                      Navigate
-                    </button>
-                  </td>
-                  <td
-                    style={{
-                      padding: '10px',
-                      borderBottom: '1px solid #ddd',
-                      color: panelStyles.color,
-                      maxWidth: '300px',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                    title={cell.description}
-                  >
-                    {cell.description}
-                  </td>
-                  <td
-                    style={{
-                      padding: '10px',
-                      borderBottom: '1px solid #ddd',
-                      color: panelStyles.color,
-                    }}
-                  >
-                    {cell.creator}
-                  </td>
-                  <td
-                    style={{
-                      padding: '10px',
-                      borderBottom: '1px solid #ddd',
-                      color: panelStyles.color,
-                    }}
-                  >
-                    {cell.timeCreated}
-                  </td>
-                  <td
-                    style={{
-                      padding: '10px',
-                      borderBottom: '1px solid #ddd',
-                      color: panelStyles.color,
-                    }}
-                  >
-                    <button
-                      onClick={async () => {
-                        try {
-                          console.log(`Joining group: ${cell.name} (ID: ${cell.groupId})`);
-                          await qortalRequest({
-                            action: "JOIN_GROUP",
-                            groupId: cell.groupId
-                          });
+                      {cell.name}
+                    </td>
+                    <td
+                      style={{
+                        padding: '10px',
+                        borderBottom: '1px solid #ddd',
+                        color: panelStyles.color,
+                      }}
+                    >
+                      <button
+                        onClick={() => {
+                          try {
+                            console.log(
+                              'Navigating to location:',
+                              cell.location
+                            );
 
-                          showSuccessModal(`Successfully joined ${cell.name} group!`);
-                        } catch (error) {
-                          console.error('Error joining group:', error);
-
-                          // Type-safe error handling
-                          let errorMessage = 'Unknown error';
-                          if (error && typeof error === 'object' && error !== null) {
-                            // Check if it's a qortal API response with message field
-                            if ('message' in error && typeof error.message === 'string') {
-                              errorMessage = error.message;
-                            } else if ('error' in error && typeof error.error === 'string') {
-                              errorMessage = error.error;
+                            const parsed = parseLocationString(cell.location);
+                            if (!parsed) {
+                              showErrorModal('Invalid coordinates in location');
+                              return;
                             }
-                          } else if (typeof error === 'string') {
-                            errorMessage = error;
+                            const zoom = !isNaN(parsed.zoom) ? parsed.zoom : 10;
+                            mapRef.current?.setView(
+                              [parsed.lat, parsed.lng],
+                              zoom,
+                              { animate: false }
+                            );
+                          } catch (error) {
+                            console.error('Error processing location:', error);
+                            showErrorModal(
+                              'Error processing location coordinates'
+                            );
                           }
-
-                          showErrorModal(`Failed to join ${cell.name} group: ${errorMessage}`);
-                        }
-                      }}
+                        }}
+                        style={{
+                          padding: '6px 12px',
+                          backgroundColor:
+                            theme === EnumTheme.DARK ? '#28a745' : '#28a745',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '14px',
+                          fontWeight: 'bold',
+                          transition: 'background-color 0.2s',
+                        }}
+                        title={`Navigate to ${cell.location}`}
+                      >
+                        Navigate
+                      </button>
+                    </td>
+                    <td
                       style={{
-                        padding: '6px 12px',
-                        backgroundColor: theme === EnumTheme.DARK ? '#28a745' : '#28a745',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        fontSize: '14px',
-                        fontWeight: 'bold',
-                        transition: 'background-color 0.2s',
+                        padding: '10px',
+                        borderBottom: '1px solid #ddd',
+                        color: panelStyles.color,
+                        maxWidth: '300px',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
                       }}
-                      onMouseOver={handleButtonMouseOver}
-                      onMouseOut={handleButtonMouseOut}
-                      title={`Join ${cell.name} group`}
+                      title={cell.description}
                     >
-                      Join
-                    </button>
-                  </td>
-                </tr>
-              ))}
+                      {cell.description}
+                    </td>
+                    <td
+                      style={{
+                        padding: '10px',
+                        borderBottom: '1px solid #ddd',
+                        color: panelStyles.color,
+                      }}
+                    >
+                      {cell.creator}
+                    </td>
+                    <td
+                      style={{
+                        padding: '10px',
+                        borderBottom: '1px solid #ddd',
+                        color: panelStyles.color,
+                      }}
+                    >
+                      {cell.timeCreated}
+                    </td>
+                    <td
+                      style={{
+                        padding: '10px',
+                        borderBottom: '1px solid #ddd',
+                        color: panelStyles.color,
+                      }}
+                    >
+                      <button
+                        onClick={async () => {
+                          try {
+                            console.log(
+                              `Joining group: ${cell.name} (ID: ${cell.groupId})`
+                            );
+                            await qortalRequest({
+                              action: 'JOIN_GROUP',
+                              groupId: cell.groupId,
+                            });
+
+                            showSuccessModal(
+                              `Successfully joined ${cell.name} group!`
+                            );
+                          } catch (error) {
+                            console.error('Error joining group:', error);
+
+                            // Type-safe error handling
+                            let errorMessage = 'Unknown error';
+                            if (
+                              error &&
+                              typeof error === 'object' &&
+                              error !== null
+                            ) {
+                              // Check if it's a qortal API response with message field
+                              if (
+                                'message' in error &&
+                                typeof error.message === 'string'
+                              ) {
+                                errorMessage = error.message;
+                              } else if (
+                                'error' in error &&
+                                typeof error.error === 'string'
+                              ) {
+                                errorMessage = error.error;
+                              }
+                            } else if (typeof error === 'string') {
+                              errorMessage = error;
+                            }
+
+                            showErrorModal(
+                              `Failed to join ${cell.name} group: ${errorMessage}`
+                            );
+                          }
+                        }}
+                        style={{
+                          padding: '6px 12px',
+                          backgroundColor:
+                            theme === EnumTheme.DARK ? '#28a745' : '#28a745',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '14px',
+                          fontWeight: 'bold',
+                          transition: 'background-color 0.2s',
+                        }}
+                        onMouseOver={handleButtonMouseOver}
+                        onMouseOut={handleButtonMouseOut}
+                        title={`Join ${cell.name} group`}
+                      >
+                        Join
+                      </button>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
 
@@ -3999,7 +4262,8 @@ function App() {
                     <h3
                       style={{
                         margin: 0,
-                        color: modalState.type === 'error' ? '#dc3545' : '#28a745',
+                        color:
+                          modalState.type === 'error' ? '#dc3545' : '#28a745',
                         fontSize: '18px',
                         fontWeight: 'bold',
                       }}
@@ -4038,7 +4302,8 @@ function App() {
                       onClick={closeModal}
                       style={{
                         padding: '8px 16px',
-                        backgroundColor: modalState.type === 'error' ? '#dc3545' : '#28a745',
+                        backgroundColor:
+                          modalState.type === 'error' ? '#dc3545' : '#28a745',
                         color: 'white',
                         border: 'none',
                         borderRadius: '4px',
@@ -4049,11 +4314,13 @@ function App() {
                       }}
                       onMouseOver={(e) => {
                         const button = e.currentTarget; // Use currentTarget instead of target
-                        button.style.backgroundColor = modalState.type === 'error' ? '#c82333' : '#218838';
+                        button.style.backgroundColor =
+                          modalState.type === 'error' ? '#c82333' : '#218838';
                       }}
                       onMouseOut={(e) => {
                         const button = e.currentTarget; // Use currentTarget instead of target
-                        button.style.backgroundColor = modalState.type === 'error' ? '#dc3545' : '#28a745';
+                        button.style.backgroundColor =
+                          modalState.type === 'error' ? '#dc3545' : '#28a745';
                       }}
                     >
                       {modalState.type === 'error' ? 'Close' : 'OK'}
@@ -4139,6 +4406,69 @@ function App() {
         
         .dark-theme .address-names-button span {
           color: #e0e0e0;
+        }
+        
+        .export-missing-btn {
+          padding: 6px 10px;
+          font-size: 12px;
+          border-radius: 4px;
+          border: 1px solid rgba(0,0,0,0.2);
+          background: rgba(255,255,255,0.95);
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .export-missing-btn:disabled {
+          cursor: not-allowed;
+          opacity: 0.7;
+        }
+        .export-missing-btn:hover:not(:disabled) {
+          background: rgba(255,255,255,1);
+        }
+        .dark-theme .export-missing-btn {
+          background: rgba(60,60,60,0.95);
+          border-color: rgba(255,255,255,0.2);
+          color: #e0e0e0;
+        }
+        .dark-theme .export-missing-btn:hover:not(:disabled) {
+          background: rgba(70,70,70,1);
+        }
+        .export-missing-dropdown {
+          position: absolute;
+          top: 100%;
+          right: 0;
+          margin-top: 2px;
+          padding: 4px 0;
+          min-width: 140px;
+          background: rgba(255,255,255,0.98);
+          border: 1px solid rgba(0,0,0,0.15);
+          border-radius: 4px;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+          z-index: 1000;
+        }
+        .dark-theme .export-missing-dropdown {
+          background: rgba(40,40,40,0.98);
+          border-color: rgba(255,255,255,0.15);
+        }
+        .export-missing-dropdown-item {
+          display: block;
+          width: 100%;
+          padding: 8px 12px;
+          font-size: 12px;
+          border: none;
+          background: none;
+          cursor: pointer;
+          text-align: left;
+          color: inherit;
+        }
+        .export-missing-dropdown-item:hover:not(:disabled) {
+          background: rgba(0,0,0,0.06);
+        }
+        .export-missing-dropdown-item:disabled {
+          cursor: wait;
+          opacity: 0.8;
+        }
+        .dark-theme .export-missing-dropdown-item:hover:not(:disabled) {
+          background: rgba(255,255,255,0.08);
         }
         
         .arrow-button {
