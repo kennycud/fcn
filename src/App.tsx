@@ -5,7 +5,7 @@ import React, {
   useRef,
   useMemo,
 } from 'react';
-import { objectToBase64, useGlobal } from 'qapp-core';
+import { objectToBase64, Spacer, useGlobal } from 'qapp-core';
 import { useAtom } from 'jotai';
 import {
   MapContainer,
@@ -15,6 +15,15 @@ import {
   useMapEvent,
 } from 'react-leaflet';
 import L from 'leaflet';
+import Dialog from '@mui/material/Dialog';
+import DialogTitle from '@mui/material/DialogTitle';
+import DialogContent from '@mui/material/DialogContent';
+import DialogActions from '@mui/material/DialogActions';
+import Button from '@mui/material/Button';
+import CircularProgress from '@mui/material/CircularProgress';
+import FormControl from '@mui/material/FormControl';
+import Select from '@mui/material/Select';
+import MenuItem from '@mui/material/MenuItem';
 
 // Add this import for the theme atom
 import { EnumTheme, themeAtom } from './state/global/system';
@@ -23,6 +32,7 @@ import {
   MapViewSync,
   SetPreviewView,
   tileToLatLng,
+  latLngToTile,
 } from './components/QdnTileLayer';
 
 interface IdentifierMapping {
@@ -68,17 +78,46 @@ interface NeighborhoodData {
   timestamp?: string | null; // timestamp when neighborhood was last updated
 }
 
-/** Parse freedom cell location string "zoom-lat-lng" (lng may be negative) to { lat, lng } or null */
-function parseCellLocation(
+/**
+ * Parse "zoom-lat-lng" string where lat/lng may be negative (e.g. 12--35.11--120.57).
+ * Returns { zoom, lat, lng } or null. Handles positive and negative coordinates.
+ */
+function parseLocationString(
   location: string
-): { lat: number; lng: number } | null {
+): { zoom: number; lat: number; lng: number } | null {
   if (!location || typeof location !== 'string') return null;
   const parts = location.split('-');
   if (parts.length < 3) return null;
-  const lat = parseFloat(parts[1]);
-  const lng = parseFloat(parts.slice(2).join('-'));
-  if (isNaN(lat) || isNaN(lng)) return null;
-  return { lat, lng };
+  const zoom = parseFloat(parts[0]);
+  if (isNaN(zoom)) return null;
+  let lat: number | null = null;
+  let lng: number | null = null;
+  let negateNext = false;
+  for (let i = 1; i < parts.length; i++) {
+    if (parts[i] === '') {
+      negateNext = true;
+      continue;
+    }
+    const val = parseFloat(parts[i]);
+    if (isNaN(val)) return null;
+    const num = negateNext ? -val : val;
+    negateNext = false;
+    if (lat === null) lat = num;
+    else if (lng === null) {
+      lng = num;
+      break;
+    }
+  }
+  if (lat === null || lng === null) return null;
+  return { zoom, lat, lng };
+}
+
+/** Parse freedom cell location "zoom-lat-lng" to { lat, lng } or null (uses parseLocationString). */
+function parseCellLocation(
+  location: string
+): { lat: number; lng: number } | null {
+  const parsed = parseLocationString(location);
+  return parsed ? { lat: parsed.lat, lng: parsed.lng } : null;
 }
 
 /** Reports current map bounds to parent when map moves (for filtering table and markers) */
@@ -331,6 +370,14 @@ function App() {
   const [freedomCellsLoading, setFreedomCellsLoading] = useState(false);
   const [freedomCellsError, setFreedomCellsError] = useState('');
   const [mapBounds, setMapBounds] = useState<L.LatLngBounds | null>(null);
+  const [exportMissingOpen, setExportMissingOpen] = useState(false);
+  const [exportMissingLoading, setExportMissingLoading] = useState(false);
+  const [exportMissingData, setExportMissingData] = useState<
+    [number, [number, number][]][] | null
+  >(null);
+  const [exportMissingDepth, setExportMissingDepth] = useState(0);
+
+  console.log('identifiers', identifiers);
 
   const [isCheckingForGroupTransaction, setIsCheckingForGroupTransaction] =
     useState(false);
@@ -577,7 +624,6 @@ function App() {
 
   // Function to fetch and process Freedom Cell data
 
-
   const fetchFreedomCellsData = async () => {
     setFreedomCellsLoading(true);
     setFreedomCellsError('');
@@ -756,13 +802,11 @@ function App() {
   // Function to navigate to the user's neighborhood
   const navigateToNeighborhood = () => {
     if (userNeighborhood && userNeighborhood.l) {
-      const parts = userNeighborhood.l.split('-');
-      const savedZoom = parseFloat(parts[0]);
-      const lat = parseFloat(parts[1]);
-      const lng = parseFloat(parts[2]);
-      console.log('details', savedZoom, lat, lng);
-      if (!isNaN(savedZoom) && !isNaN(lat) && !isNaN(lng)) {
-        mapRef.current?.setView([lat, lng], savedZoom, { animate: false });
+      const parsed = parseLocationString(userNeighborhood.l);
+      if (parsed) {
+        mapRef.current?.setView([parsed.lat, parsed.lng], parsed.zoom, {
+          animate: false,
+        });
       } else {
         alert('Invalid coordinates in neighborhood data');
       }
@@ -1063,6 +1107,64 @@ function App() {
     (z: number, x: number, y: number) => fetchImage(`${z}-${x}-${y}`),
     [fetchImage]
   );
+
+  /** Zoom range for missing-tiles export (must match tile layer limits). */
+  const MISSING_TILES_MIN_ZOOM = 1;
+  const MISSING_TILES_MAX_ZOOM = 20;
+  const MISSING_TILES_MAX_DEPTH = 3;
+
+  /**
+   * Get missing tiles in current map bounds as 2-level array: [ [zoom, [[x,y], ...]], ... ].
+   * Includes current zoom plus `depth` levels deeper (0 = current only; zooms clamped to 1..20).
+   * "Missing" = tile id not published by any Cartographer name (from searchsimple; no image fetch).
+   */
+  const getMissingTilesInBounds = useCallback(
+    async (depth: number): Promise<[number, [number, number][]][]> => {
+      const map = mapRef.current;
+      const bounds = map?.getBounds() ?? mapBounds;
+      if (!bounds) return [];
+      const currentZoom = map
+        ? Math.round(map.getZoom())
+        : zoom;
+      const clampedDepth = Math.max(
+        0,
+        Math.min(MISSING_TILES_MAX_DEPTH, depth)
+      );
+      const publishedSet = new Set(identifiers.map((i) => i.identifier));
+      const result: [number, [number, number][]][] = [];
+      for (let d = 0; d <= clampedDepth; d++) {
+        const z = Math.min(
+          MISSING_TILES_MAX_ZOOM,
+          Math.max(MISSING_TILES_MIN_ZOOM, currentZoom + d)
+        );
+        const n = Math.pow(2, z);
+        const maxTile = Math.max(0, n - 1);
+        const nw = latLngToTile(z, bounds.getNorth(), bounds.getWest());
+        const se = latLngToTile(z, bounds.getSouth(), bounds.getEast());
+        const xMin = Math.max(0, Math.min(nw.x, se.x));
+        const xMax = Math.min(maxTile, Math.max(nw.x, se.x));
+        const yMin = Math.max(0, Math.min(nw.y, se.y));
+        const yMax = Math.min(maxTile, Math.max(nw.y, se.y));
+        const missing: [number, number][] = [];
+        for (let x = xMin; x <= xMax; x++) {
+          for (let y = yMin; y <= yMax; y++) {
+            const tileId = `${z}-${x}-${y}`;
+            if (!publishedSet.has(tileId)) missing.push([x, y]);
+          }
+        }
+        const lastZ = result.length > 0 ? result[result.length - 1][0] : null;
+        if (lastZ !== z) result.push([z, missing]);
+        if (z >= MISSING_TILES_MAX_ZOOM) break;
+      }
+      return result;
+    },
+    [mapBounds, zoom, identifiers]
+  );
+
+  const handleExportMissingDialogClose = useCallback(() => {
+    setExportMissingOpen(false);
+    setExportMissingData(null);
+  }, []);
 
   // Handle Start Freedom Cell wizard submission - prepare for confirmation
   const handleFreedomCellSubmit = async (e: React.FormEvent) => {
@@ -1528,11 +1630,15 @@ function App() {
 
       // Update freedomCellsData state: update this user's cell location, or add a new item with group description
       const newLocation = `${currentZoom}-${centerLat}-${centerLng}`;
-      const existingCell = freedomCellsData.find((cell) => cell.creator === userName);
+      const existingCell = freedomCellsData.find(
+        (cell) => cell.creator === userName
+      );
       if (existingCell) {
         setFreedomCellsData((prev) =>
           prev.map((cell) =>
-            cell.creator === userName ? { ...cell, location: newLocation } : cell
+            cell.creator === userName
+              ? { ...cell, location: newLocation }
+              : cell
           )
         );
       } else {
@@ -1817,14 +1923,13 @@ function App() {
                   userNeighborhood.t &&
                   userNeighborhood.l ? (
                     (() => {
-                      const parts = userNeighborhood.l.split('-');
-                      const savedZoom = parseFloat(parts[0]);
-                      const lat = parseFloat(parts[1]);
-                      const lng = parseFloat(parts[2]);
-                      if (isNaN(savedZoom) || isNaN(lat) || isNaN(lng))
-                        return null;
-                      const hoodCenter: L.LatLngExpression = { lat, lng };
-                      const hoodPreviewZoom = Math.max(1, savedZoom - 1);
+                      const parsed = parseLocationString(userNeighborhood.l);
+                      if (!parsed) return null;
+                      const hoodCenter: L.LatLngExpression = {
+                        lat: parsed.lat,
+                        lng: parsed.lng,
+                      };
+                      const hoodPreviewZoom = Math.max(1, parsed.zoom - 1);
                       if (!hoodCenter) return null;
                       return (
                         <div
@@ -2090,30 +2195,261 @@ function App() {
                 style={{ position: 'absolute', top: '0', left: '0' }}
               ></button>
 
-              {/* Zoom Controls - Top Right Corner */}
+              {/* Export missing tiles + Zoom Controls - Top Right Corner */}
               <div
                 style={{
                   position: 'absolute',
                   top: '0',
                   right: '0',
                   display: 'flex',
-                  flexDirection: 'column',
+                  flexDirection: 'row',
+                  alignItems: 'flex-start',
+                  gap: '4px',
                 }}
               >
-                <button
-                  onClick={handleZoomIn}
-                  disabled={zoom >= 20 || addressNames.length === 0}
-                  className="zoom-button zoom-plus"
-                  title="Zoom In"
-                  style={{ borderRadius: '4px 4px 0 0' }}
-                ></button>
-                <button
-                  onClick={handleZoomOut}
-                  disabled={zoom <= 1 || addressNames.length === 0}
-                  className="zoom-button zoom-minus"
-                  title="Zoom Out"
-                  style={{ borderRadius: '0 0 4px 4px', marginTop: '1px' }}
-                ></button>
+                {/* <button
+                  type="button"
+                  onClick={() => setExportMissingOpen(true)}
+                  disabled={!mapBounds || addressNames.length === 0}
+                  title="Export missing tiles in current view"
+                  className="export-missing-btn"
+                >
+                  Export missing
+                </button> */}
+                <Dialog
+                  open={exportMissingOpen}
+                  onClose={handleExportMissingDialogClose}
+                  maxWidth="sm"
+                  fullWidth
+                >
+                  <DialogTitle>Export missing tiles</DialogTitle>
+                  <DialogContent
+                    sx={{
+                      color: theme === EnumTheme.DARK ? '#e0e0e0' : '#1a1a1a',
+                    }}
+                  >
+                    <Spacer height="25px" />
+                    {!exportMissingData ? (
+                      <div
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 16,
+                          width: '100%',
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 14,
+                            fontWeight: 500,
+                            marginBottom: 6,
+                            color:
+                              theme === EnumTheme.DARK ? '#e0e0e0' : '#333',
+                          }}
+                        >
+                          Levels deeper
+                        </div>
+                        <FormControl
+                          size="small"
+                          fullWidth
+                          variant="outlined"
+                          sx={{
+                            '& .MuiOutlinedInput-root': {
+                              color: 'inherit',
+                              backgroundColor:
+                                theme === EnumTheme.DARK
+                                  ? 'rgba(255,255,255,0.08)'
+                                  : 'rgba(0,0,0,0.04)',
+                              '& fieldset': {
+                                borderColor:
+                                  theme === EnumTheme.DARK
+                                    ? '#666'
+                                    : 'rgba(0,0,0,0.23)',
+                              },
+                              '&:hover fieldset': {
+                                borderColor:
+                                  theme === EnumTheme.DARK
+                                    ? '#888'
+                                    : 'rgba(0,0,0,0.4)',
+                              },
+                            },
+                          }}
+                        >
+                          <Select
+                            value={exportMissingDepth}
+                            displayEmpty
+                            onChange={(e) =>
+                              setExportMissingDepth(
+                                Number(e.target.value) as 0 | 1 | 2 | 3
+                              )
+                            }
+                            sx={{ color: 'inherit' }}
+                            renderValue={(v) =>
+                              v === 0
+                                ? '0 (current zoom only)'
+                                : String(v)
+                            }
+                          >
+                            <MenuItem value={0}>0 (current zoom only)</MenuItem>
+                            <MenuItem value={1}>1</MenuItem>
+                            <MenuItem value={2}>2</MenuItem>
+                            <MenuItem value={3}>3</MenuItem>
+                          </Select>
+                        </FormControl>
+                        <Button
+                          variant="contained"
+                          onClick={async () => {
+                            setExportMissingLoading(true);
+                            try {
+                              const data =
+                                await getMissingTilesInBounds(
+                                  exportMissingDepth
+                                );
+                              setExportMissingData(data);
+                            } finally {
+                              setExportMissingLoading(false);
+                            }
+                          }}
+                          disabled={exportMissingLoading}
+                          startIcon={
+                            exportMissingLoading ? (
+                              <CircularProgress size={18} color="inherit" />
+                            ) : null
+                          }
+                        >
+                          {exportMissingLoading ? 'Generating…' : 'Generate'}
+                        </Button>
+                      </div>
+                    ) : (
+                      <div>
+                        <div
+                          style={{
+                            marginBottom: 12,
+                            fontSize: 14,
+                            color:
+                              theme === EnumTheme.DARK ? '#e0e0e0' : '#333',
+                          }}
+                        >
+                          {(() => {
+                            const totalMissing = exportMissingData.reduce(
+                              (sum, [, tiles]) => sum + tiles.length,
+                              0
+                            );
+                            const jsonStr = JSON.stringify(
+                              exportMissingData,
+                              null,
+                              2
+                            );
+                            const bytes = new Blob([jsonStr]).size;
+                            const sizeStr =
+                              bytes < 1024
+                                ? `${bytes} B`
+                                : bytes < 1024 * 1024
+                                  ? `${(bytes / 1024).toFixed(1)} KB`
+                                  : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+                            return (
+                              <>
+                                <strong>{totalMissing.toLocaleString()}</strong>{' '}
+                                missing tile
+                                {totalMissing !== 1 ? 's' : ''} across{' '}
+                                {exportMissingData.length} zoom level
+                                {exportMissingData.length !== 1 ? 's' : ''}
+                                {' · '}
+                                File size: <strong>{sizeStr}</strong>
+                              </>
+                            );
+                          })()}
+                        </div>
+                        <div
+                          style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}
+                        >
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            sx={{
+                              color: 'inherit',
+                              borderColor:
+                                theme === EnumTheme.DARK ? '#888' : undefined,
+                            }}
+                            onClick={async () => {
+                              if (!exportMissingData) return;
+                              await navigator.clipboard.writeText(
+                                JSON.stringify(exportMissingData)
+                              );
+                            }}
+                          >
+                            Copy as JSON
+                          </Button>
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            sx={{
+                              color: 'inherit',
+                              borderColor:
+                                theme === EnumTheme.DARK ? '#888' : undefined,
+                            }}
+                            onClick={() => {
+                              if (!exportMissingData) return;
+                              const blob = new Blob(
+                                [JSON.stringify(exportMissingData, null, 2)],
+                                { type: 'application/json' }
+                              );
+                              const a = document.createElement('a');
+                              a.href = URL.createObjectURL(blob);
+                              a.download = `missing-tiles-z${zoom}.json`;
+                              a.click();
+                              URL.revokeObjectURL(a.href);
+                            }}
+                          >
+                            Download JSON
+                          </Button>
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            sx={{
+                              color: 'inherit',
+                              borderColor:
+                                theme === EnumTheme.DARK ? '#888' : undefined,
+                            }}
+                            onClick={() => setExportMissingData(null)}
+                          >
+                            Generate again
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </DialogContent>
+                  <DialogActions
+                    sx={{
+                      color: theme === EnumTheme.DARK ? '#e0e0e0' : '#1a1a1a',
+                    }}
+                  >
+                    <Button
+                      onClick={handleExportMissingDialogClose}
+                      sx={{
+                        color: 'inherit',
+                      }}
+                    >
+                      Close
+                    </Button>
+                  </DialogActions>
+                </Dialog>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <button
+                    onClick={handleZoomIn}
+                    disabled={zoom >= 20 || addressNames.length === 0}
+                    className="zoom-button zoom-plus"
+                    title="Zoom In"
+                    style={{ borderRadius: '4px 4px 0 0' }}
+                  ></button>
+                  <button
+                    onClick={handleZoomOut}
+                    disabled={zoom <= 1 || addressNames.length === 0}
+                    className="zoom-button zoom-minus"
+                    title="Zoom Out"
+                    style={{ borderRadius: '0 0 4px 4px', marginTop: '1px' }}
+                  ></button>
+                </div>
               </div>
 
               {/* Arrow Controls - Centered on Edges */}
@@ -3740,17 +4076,17 @@ function App() {
                               cell.location
                             );
 
-                            const parts = cell.location.split('-');
-                            const newZoom = parseFloat(parts[0]);
-                            const lat = parseFloat(parts[1]);
-                            const lng = parseFloat(parts[2]);
-                            if (isNaN(newZoom) || isNaN(lat) || isNaN(lng)) {
+                            const parsed = parseLocationString(cell.location);
+                            if (!parsed) {
                               showErrorModal('Invalid coordinates in location');
                               return;
                             }
-                            mapRef.current?.setView([lat, lng], newZoom, {
-                              animate: false,
-                            });
+                            const zoom = !isNaN(parsed.zoom) ? parsed.zoom : 10;
+                            mapRef.current?.setView(
+                              [parsed.lat, parsed.lng],
+                              zoom,
+                              { animate: false }
+                            );
                           } catch (error) {
                             console.error('Error processing location:', error);
                             showErrorModal(
@@ -4070,6 +4406,69 @@ function App() {
         
         .dark-theme .address-names-button span {
           color: #e0e0e0;
+        }
+        
+        .export-missing-btn {
+          padding: 6px 10px;
+          font-size: 12px;
+          border-radius: 4px;
+          border: 1px solid rgba(0,0,0,0.2);
+          background: rgba(255,255,255,0.95);
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .export-missing-btn:disabled {
+          cursor: not-allowed;
+          opacity: 0.7;
+        }
+        .export-missing-btn:hover:not(:disabled) {
+          background: rgba(255,255,255,1);
+        }
+        .dark-theme .export-missing-btn {
+          background: rgba(60,60,60,0.95);
+          border-color: rgba(255,255,255,0.2);
+          color: #e0e0e0;
+        }
+        .dark-theme .export-missing-btn:hover:not(:disabled) {
+          background: rgba(70,70,70,1);
+        }
+        .export-missing-dropdown {
+          position: absolute;
+          top: 100%;
+          right: 0;
+          margin-top: 2px;
+          padding: 4px 0;
+          min-width: 140px;
+          background: rgba(255,255,255,0.98);
+          border: 1px solid rgba(0,0,0,0.15);
+          border-radius: 4px;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+          z-index: 1000;
+        }
+        .dark-theme .export-missing-dropdown {
+          background: rgba(40,40,40,0.98);
+          border-color: rgba(255,255,255,0.15);
+        }
+        .export-missing-dropdown-item {
+          display: block;
+          width: 100%;
+          padding: 8px 12px;
+          font-size: 12px;
+          border: none;
+          background: none;
+          cursor: pointer;
+          text-align: left;
+          color: inherit;
+        }
+        .export-missing-dropdown-item:hover:not(:disabled) {
+          background: rgba(0,0,0,0.06);
+        }
+        .export-missing-dropdown-item:disabled {
+          cursor: wait;
+          opacity: 0.8;
+        }
+        .dark-theme .export-missing-dropdown-item:hover:not(:disabled) {
+          background: rgba(255,255,255,0.08);
         }
         
         .arrow-button {
