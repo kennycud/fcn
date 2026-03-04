@@ -847,10 +847,10 @@ function App() {
 
       // Filter results by category = 9
       const filteredResults = Array.isArray(data)
-        ? data.filter((result) => result.category === 9)
+        ? data.filter((result) => result.category === 977)
         : [];
 
-      console.log('Filtered results (category = 9):', filteredResults);
+      console.log('Filtered results (category = 977):', filteredResults);
 
       // Sort filtered results by score in descending order
       const sortedResults = filteredResults.sort((a, b) => {
@@ -901,54 +901,14 @@ function App() {
     try {
       console.log('Clicked link:', link, 'from result:', resultName);
 
-      // Parse the link using dash mark as delimiter
-      const parts = link.split('-');
-
-      if (parts.length !== 3) {
-        console.error('Invalid link format. Expected: zoom-x-y, got:', link);
-        alert('Invalid link format. Expected format: zoom-x-y');
-        return;
-      }
-
-      const newZoom = parseInt(parts[0]);
-      const newX = parseInt(parts[1]);
-      const newY = parseInt(parts[2]);
-
-      // Validate the parsed values
-      if (isNaN(newZoom) || isNaN(newX) || isNaN(newY)) {
-        console.error('Invalid coordinates in link:', link);
-        alert('Invalid coordinates in link');
-        return;
-      }
-
-      if (newZoom < 1 || newZoom > 20) {
-        console.error('Invalid zoom level in link:', newZoom);
-        alert(`Invalid zoom level: ${newZoom}. Must be between 1 and 20`);
-        return;
-      }
-
-      if (newX < 0 || newY < 0) {
-        console.error('Invalid coordinates in link:', newX, newY);
-        alert(`Invalid coordinates: X and Y must be non-negative`);
-        return;
-      }
-
-      if (newX >= 2 ** newZoom || newY >= 2 ** newZoom) {
-        console.error('Coordinates out of bounds for zoom level:', {
-          newX,
-          newY,
-          newZoom,
+      const parsed = parseLocationString(link);
+      if (parsed) {
+        mapRef.current?.setView([parsed.lat, parsed.lng], parsed.zoom, {
+          animate: false,
         });
-        alert(`Coordinates out of bounds for zoom level ${newZoom}`);
-        return;
+      } else {
+        alert('Invalid coordinates in link data');
       }
-
-      // Update the state with new values
-      setZoom(newZoom);
-      setX(newX);
-      setY(newY);
-      const center = tileToLatLng(newZoom, newX + 0.5, newY + 0.5);
-      mapRef.current?.setView(center, newZoom, { animate: false });
     } catch (error) {
       console.error('Error processing link:', error);
       alert('Error processing link coordinates');
@@ -1481,20 +1441,21 @@ function App() {
       // Set the index identifier to display it
       setIndexIdentifier(prefixedIdentifier);
 
-      // Get the upper left tile identifier (first tile in the grid)
-      const upperLeftIdentifier = `${zoom}-${x}-${y}`;
+      // Get the map center lat/lng and zoom from Leaflet
+      const mapCenter = mapRef.current?.getCenter();
+      const centerLat = mapCenter ? mapCenter.lat : 0;
+      const centerLng = mapCenter ? mapCenter.lng : 0;
+      const currentZoom = mapRef.current?.getZoom() ?? zoom;
 
-      // Find the identifier mapping for the upper left tile to get its name
-      const upperLeftMapping = identifiers.find(
-        (item) => item.identifier === upperLeftIdentifier
-      );
+      // Get the upper left tile identifier (first tile in the grid)
+      const locationCenter = `${currentZoom}-${centerLat}-${centerLng}`;
 
       // Build the object with the specified structure using lowercase term
       const newBuiltObject = {
         t: lowerCaseTerm, // the term in lowercase
-        n: upperLeftMapping ? upperLeftMapping.name : 'Unknown', // the name from the upper left tile
-        c: 9, // the category number
-        l: `${zoom}-${x}-${y}`, // location coordinates separated by dash marks
+        n: 'FCN',
+        c: 977, // the category number
+        l: `${locationCenter}`, // location coordinates separated by dash marks
       };
 
       setBuiltObject(newBuiltObject);
@@ -1502,11 +1463,8 @@ function App() {
       // Also log both to console
       console.log('Index identifier:', prefixedIdentifier);
       console.log('Built object:', newBuiltObject);
-      console.log('Upper left tile identifier:', upperLeftIdentifier);
-      console.log(
-        'Upper left tile name:',
-        upperLeftMapping ? upperLeftMapping.name : 'Unknown'
-      );
+      console.log('Upper left tile identifier:', locationCenter);
+
 
       // Create a JSON array containing the newBuiltObject
       const jsonArray = [newBuiltObject];
