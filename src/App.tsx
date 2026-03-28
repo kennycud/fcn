@@ -323,8 +323,8 @@ function App() {
 
   const [followedNames, setFollowedNames] = useState<string[]>([]);
 
-  const [x, setX] = useState(0);
-  const [y, setY] = useState(0);
+  const [x, setX] = useState(1);
+  const [y, setY] = useState(1);
   const [zoom, setZoom] = useState(1);
   const mapRef = useRef<L.Map | null>(null);
   const [identifiers, setIdentifiers] = useState<IdentifierMapping[]>([]);
@@ -2439,14 +2439,14 @@ function App() {
                 <div style={{ display: 'flex', flexDirection: 'column' }}>
                   <button
                     onClick={handleZoomIn}
-                    disabled={zoom >= 20 || addressNames.length === 0}
+                    disabled={zoom >= 20}
                     className="zoom-button zoom-plus"
                     title="Zoom In"
                     style={{ borderRadius: '4px 4px 0 0' }}
                   ></button>
                   <button
                     onClick={handleZoomOut}
-                    disabled={zoom <= 1 || addressNames.length === 0}
+                    disabled={zoom <= 1}
                     className="zoom-button zoom-minus"
                     title="Zoom Out"
                     style={{ borderRadius: '0 0 4px 4px', marginTop: '1px' }}
@@ -2458,7 +2458,7 @@ function App() {
               <button
                 onClick={() => handlePan(0, -1)}
                 disabled={
-                  isButtonDisabled(x, y - 1, zoom) || addressNames.length === 0
+                  isButtonDisabled(x, y - 1, zoom)
                 }
                 className="arrow-button arrow-up"
                 title="Pan Up"
@@ -2473,7 +2473,7 @@ function App() {
               <button
                 onClick={() => handlePan(-1, 0)}
                 disabled={
-                  isButtonDisabled(x - 1, y, zoom) || addressNames.length === 0
+                  isButtonDisabled(x - 1, y, zoom)
                 }
                 className="arrow-button arrow-left"
                 title="Pan Left"
@@ -2488,7 +2488,7 @@ function App() {
               <button
                 onClick={() => handlePan(1, 0)}
                 disabled={
-                  isButtonDisabled(x + 1, y, zoom) || addressNames.length === 0
+                  isButtonDisabled(x + 1, y, zoom)
                 }
                 className="arrow-button arrow-right"
                 title="Pan Right"
@@ -2503,7 +2503,7 @@ function App() {
               <button
                 onClick={() => handlePan(0, 1)}
                 disabled={
-                  isButtonDisabled(x, y + 1, zoom) || addressNames.length === 0
+                  isButtonDisabled(x, y + 1, zoom)
                 }
                 className="arrow-button arrow-down"
                 title="Pan Down"
@@ -4022,6 +4022,17 @@ function App() {
                       textAlign: 'left',
                       borderBottom: '1px solid #ddd',
                       color: panelStyles.color,
+                      width: '150px',
+                    }}
+                  >
+                    Onboard Link
+                  </th>
+                  <th
+                    style={{
+                      padding: '10px',
+                      textAlign: 'left',
+                      borderBottom: '1px solid #ddd',
+                      color: panelStyles.color,
                     }}
                   >
                     Action
@@ -4034,20 +4045,30 @@ function App() {
                     key={index}
                     style={{
                       backgroundColor:
-                        index % 2 === 0
-                          ? theme === EnumTheme.DARK
-                            ? '#333'
-                            : '#ffffff'
-                          : theme === EnumTheme.DARK
-                            ? '#3a3a3a'
-                            : '#f9f9f9',
+                        cell.creator === auth?.name
+                          ? '#6f42c1'
+                          : index % 2 === 0
+                            ? theme === EnumTheme.DARK
+                              ? '#333'
+                              : '#ffffff'
+                            : theme === EnumTheme.DARK
+                              ? '#3a3a3a'
+                              : '#f9f9f9',
+                      color:
+                        cell.creator === auth?.name && theme === EnumTheme.LIGHT
+                          ? 'white'
+                          : undefined,
                     }}
                   >
                     <td
                       style={{
                         padding: '10px',
                         borderBottom: '1px solid #ddd',
-                        color: panelStyles.color,
+                        color:
+                          cell.creator === auth?.name &&
+                          theme === EnumTheme.LIGHT
+                            ? 'white'
+                            : panelStyles.color,
                       }}
                     >
                       {cell.name}
@@ -4056,7 +4077,11 @@ function App() {
                       style={{
                         padding: '10px',
                         borderBottom: '1px solid #ddd',
-                        color: panelStyles.color,
+                        color:
+                          cell.creator === auth?.name &&
+                          theme === EnumTheme.LIGHT
+                            ? 'white'
+                            : panelStyles.color,
                       }}
                     >
                       <button
@@ -4106,7 +4131,11 @@ function App() {
                       style={{
                         padding: '10px',
                         borderBottom: '1px solid #ddd',
-                        color: panelStyles.color,
+                        color:
+                          cell.creator === auth?.name &&
+                          theme === EnumTheme.LIGHT
+                            ? 'white'
+                            : panelStyles.color,
                         maxWidth: '300px',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
@@ -4120,7 +4149,11 @@ function App() {
                       style={{
                         padding: '10px',
                         borderBottom: '1px solid #ddd',
-                        color: panelStyles.color,
+                        color:
+                          cell.creator === auth?.name &&
+                          theme === EnumTheme.LIGHT
+                            ? 'white'
+                            : panelStyles.color,
                       }}
                     >
                       {cell.creator}
@@ -4129,7 +4162,11 @@ function App() {
                       style={{
                         padding: '10px',
                         borderBottom: '1px solid #ddd',
-                        color: panelStyles.color,
+                        color:
+                          cell.creator === auth?.name &&
+                          theme === EnumTheme.LIGHT
+                            ? 'white'
+                            : panelStyles.color,
                       }}
                     >
                       {cell.timeCreated}
@@ -4138,7 +4175,55 @@ function App() {
                       style={{
                         padding: '10px',
                         borderBottom: '1px solid #ddd',
-                        color: panelStyles.color,
+                        color:
+                          cell.creator === auth?.name &&
+                          theme === EnumTheme.LIGHT
+                            ? 'white'
+                            : panelStyles.color,
+                        width: '150px',
+                      }}
+                    >
+                      <button
+                        onClick={async () => {
+                          try {
+                            const link = `https://qortal.dev/onboarding?groupId=${cell.groupId}`;
+                            await navigator.clipboard.writeText(link);
+                            showSuccessModal(
+                              `Link copied to clipboard!\n${link}`
+                            );
+                          } catch (error) {
+                            console.error('Error copying link:', error);
+                            showErrorModal('Failed to copy link to clipboard');
+                          }
+                        }}
+                        style={{
+                          padding: '6px 12px',
+                          backgroundColor:
+                            theme === EnumTheme.DARK ? '#28a745' : '#28a745',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '14px',
+                          fontWeight: 'bold',
+                          transition: 'background-color 0.2s',
+                        }}
+                        onMouseOver={handleButtonMouseOver}
+                        onMouseOut={handleButtonMouseOut}
+                        title={`Copy link for ${cell.name}`}
+                      >
+                        Copy Link
+                      </button>
+                    </td>
+                    <td
+                      style={{
+                        padding: '10px',
+                        borderBottom: '1px solid #ddd',
+                        color:
+                          cell.creator === auth?.name &&
+                          theme === EnumTheme.LIGHT
+                            ? 'white'
+                            : panelStyles.color,
                       }}
                     >
                       <button
@@ -4279,6 +4364,8 @@ function App() {
                       marginBottom: '20px',
                       fontSize: '16px',
                       lineHeight: '1.5',
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-all',
                     }}
                   >
                     {modalState.message}

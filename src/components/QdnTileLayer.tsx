@@ -70,6 +70,15 @@ export function MapViewSync({
       stateFromMapRef.current = false;
       return;
     }
+
+    const currentZoom = Math.round(map.getZoom());
+    const c = map.getCenter();
+    const { x: tx, y: ty } = latLngToTile(currentZoom, c.lat, c.lng);
+
+    if (currentZoom === zoom && tx === x && ty === y) {
+      return;
+    }
+
     skipNextSyncRef.current = true;
     const clampedZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
     const center = tileToLatLng(clampedZoom, x + 0.5, y + 0.5);
