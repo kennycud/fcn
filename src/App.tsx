@@ -2209,7 +2209,7 @@ function App() {
                   gap: '4px',
                 }}
               >
-                {/* <button
+                {auth?.name === 'Cartographer' && <button
                   type="button"
                   onClick={() => setExportMissingOpen(true)}
                   disabled={!mapBounds || addressNames.length === 0}
@@ -2217,7 +2217,7 @@ function App() {
                   className="export-missing-btn"
                 >
                   Export missing
-                </button> */}
+                </button> }
                 <Dialog
                   open={exportMissingOpen}
                   onClose={handleExportMissingDialogClose}
