@@ -317,6 +317,8 @@ function App() {
 
   // Add these state variables after the existing state declarations
   const [showAddressNamesModal, setShowAddressNamesModal] = useState(false);
+  const [showFreedomCellActionModal, setShowFreedomCellActionModal] =
+    useState(false);
   const [addressNames, setAddressNames] = useState<string[]>([]);
   const [addressNamesLoading, setAddressNamesLoading] = useState(false);
   const [addressNamesError, setAddressNamesError] = useState('');
@@ -1763,39 +1765,66 @@ function App() {
         </div>
 
         {/* Address Names Button in Upper Right Corner */}
-        <button
-          onClick={() => {
-            setShowAddressNamesModal(true);
-            fetchCartographerAddressAndNames();
-          }}
-          className="address-names-button address-icon"
-          title="Show Cartographer Address Names"
-          style={{
-            width: '250px',
-            height: '50px',
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center',
-            backgroundColor:
-              addressNames.length > 0 &&
-              addressNames.every((name) => followedNames.includes(name))
-                ? '#28a745'
-                : '#dc3545',
-            border: `1px solid ${theme === EnumTheme.DARK ? '#666' : '#ccc'}`,
-            borderRadius: '4px',
-            cursor: 'pointer',
-          }}
-        >
-          <span
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button
+            onClick={() => setShowFreedomCellActionModal(true)}
+            title="Call to Action"
             style={{
-              fontSize: '18px',
-              fontWeight: 'bold',
-              color: 'white',
+              width: '500px',
+              height: '50px',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              backgroundColor: '#007bff',
+              border: `1px solid ${theme === EnumTheme.DARK ? '#666' : '#ccc'}`,
+              borderRadius: '4px',
+              cursor: 'pointer',
             }}
           >
-            Map Image Hosting
-          </span>
-        </button>
+            <span
+              style={{
+                fontSize: '18px',
+                fontWeight: 'bold',
+                color: 'white',
+              }}
+            >
+              Have you joined a freedom cell and need a call to action?
+            </span>
+          </button>
+          <button
+            onClick={() => {
+              setShowAddressNamesModal(true);
+              fetchCartographerAddressAndNames();
+            }}
+            className="address-names-button address-icon"
+            title="Show Cartographer Address Names"
+            style={{
+              width: '250px',
+              height: '50px',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              backgroundColor:
+                addressNames.length > 0 &&
+                addressNames.every((name) => followedNames.includes(name))
+                  ? '#28a745'
+                  : '#dc3545',
+              border: `1px solid ${theme === EnumTheme.DARK ? '#666' : '#ccc'}`,
+              borderRadius: '4px',
+              cursor: 'pointer',
+            }}
+          >
+            <span
+              style={{
+                fontSize: '18px',
+                fontWeight: 'bold',
+                color: 'white',
+              }}
+            >
+              Map Image Hosting
+            </span>
+          </button>
+        </div>
       </div>
 
       {/* Lists Section */}
@@ -2745,6 +2774,108 @@ function App() {
             <div style={{ marginTop: '15px', textAlign: 'center' }}>
               <button
                 onClick={() => setShowAddressNamesModal(false)}
+                style={{
+                  padding: '8px 16px',
+                  backgroundColor: '#6c757d',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Freedom Cell Action Modal */}
+      {showFreedomCellActionModal && (
+        <div
+          className={theme === EnumTheme.DARK ? 'dark-theme' : 'light-theme'}
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            zIndex: 1000,
+          }}
+        >
+          <div
+            style={{
+              borderRadius: '8px',
+              padding: '20px',
+              width: '90%',
+              maxWidth: '500px',
+              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+              backgroundColor: 'var(--modal-bg-color, #2c2c2c)',
+              color: 'var(--modal-text-color, #e0e0e0)',
+            }}
+          >
+            <h2
+              style={{
+                marginTop: 0,
+                fontSize: '20px',
+                borderBottom: '1px solid var(--modal-border-color, #444)',
+                paddingBottom: '10px',
+                textAlign: 'center',
+              }}
+            >
+              Have you joined a freedom cell and need a call to action?
+            </h2>
+
+            <div style={{ margin: '20px 0', lineHeight: '1.6' }}>
+              <p style={{ fontWeight: 'bold' }}>
+                You can do the following ...
+              </p>
+              <ul style={{ paddingLeft: '20px' }}>
+                <li>Select the chat button on the left side panel</li>
+                <li>Wait for your freedom cell chat group to appear</li>
+                <li>Say hello to the group and introduce yourself</li>
+              </ul>
+              <p style={{ marginTop: '20px' }}>
+                Click the button below to see a video with more information on
+                how groups work on Qortal.
+              </p>
+              <div style={{ textAlign: 'center', marginTop: '20px' }}>
+                <button
+                  onClick={async () => {
+                    try {
+                      await qortalRequest({
+                        action: 'OPEN_NEW_TAB',
+                        qortalLink:
+                          'qortal://APP/Q-Tube/video/On%20Qortal/qtube_vid_groups-on-qortal_aq2f9S_metadata',
+                      });
+                    } catch (error) {
+                      console.error('Error opening Qortal link:', error);
+                    }
+                  }}
+                  style={{
+                    display: 'inline-block',
+                    padding: '10px 20px',
+                    backgroundColor: '#007bff',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    fontWeight: 'bold',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Watch Video
+                </button>
+              </div>
+            </div>
+
+            <div style={{ marginTop: '25px', textAlign: 'center' }}>
+              <button
+                onClick={() => setShowFreedomCellActionModal(false)}
                 style={{
                   padding: '8px 16px',
                   backgroundColor: '#6c757d',
